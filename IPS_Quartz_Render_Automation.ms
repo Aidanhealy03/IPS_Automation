@@ -29,6 +29,7 @@ global TEMP_SCENE_FOLDER  = @"R:\Aidan\IPS\_TempScenes"
 global DRY_RUN            = false
 global USE_TEMP_SCENE_PER_JOB = true
 global SUBMISSION_STABILIZE_MS = 250
+global PREFER_BATCH_RENDER_SUBMIT = true
 
 /* =========================
    HARDCODED TABLES
@@ -148,18 +149,17 @@ fn collectAllSinkRootNodes =
     roots
 )
 
+fn collectNodeHierarchyWalk n outRef =
+(
+    if n == undefined or (not isValidNode n) then return undefined
+    append outRef n
+    for c in n.children do collectNodeHierarchyWalk c outRef
+)
+
 fn collectNodeHierarchy node =
 (
     local outNodes = #()
-
-    fn walk n outRef =
-    (
-        if n == undefined or (not isValidNode n) then return undefined
-        append outRef n
-        for c in n.children do walk c outRef
-    )
-
-    walk node outNodes
+    collectNodeHierarchyWalk node outNodes
     outNodes
 )
 
@@ -409,6 +409,34 @@ fn submitViaNetRender tempScenePath jobName managerIP managerPort =
     submitted
 )
 
+fn submitViaBatchRenderIfPossible tempScenePath jobName =
+(
+    if DRY_RUN then return true
+    if not PREFER_BATCH_RENDER_SUBMIT then return false
+
+    local submitted = false
+
+    -- Try common batch-render manager entry points via execute for version tolerance.
+    try
+    (
+        local cmdA = "if (batchRenderMgr != undefined and isProperty batchRenderMgr #submitToNetwork) then (batchRenderMgr.submitToNetwork @\"" + tempScenePath + "\" @\"" + jobName + "\") else false"
+        local rA = execute cmdA
+        submitted = (rA != undefined and rA != false)
+    ) catch()
+
+    if not submitted then
+    (
+        try
+        (
+            local cmdB = "if (batchRenderMgr != undefined and isProperty batchRenderMgr #netRender) then (batchRenderMgr.netRender @\"" + tempScenePath + "\" @\"" + jobName + "\") else false"
+            local rB = execute cmdB
+            submitted = (rB != undefined and rB != false)
+        ) catch()
+    )
+
+    submitted
+)
+
 fn submitBackburnerJob camNode outputPath jobName =
 (
     local success = false
@@ -430,7 +458,8 @@ fn submitBackburnerJob camNode outputPath jobName =
             submissionScene = tempScene
         )
 
-        success = submitViaNetRender submissionScene jobName BACKBURNER_MANAGER BACKBURNER_PORT
+        success = submitViaBatchRenderIfPossible submissionScene jobName
+        if not success do success = submitViaNetRender submissionScene jobName BACKBURNER_MANAGER BACKBURNER_PORT
     )
     catch
     (
@@ -469,6 +498,7 @@ fn allMappedSkus =
     ips_log ("Backburner port: " + (BACKBURNER_PORT as string))
     ips_log ("Render size: " + (RENDER_WIDTH as string) + "x" + (RENDER_HEIGHT as string))
     ips_log ("Use temp scene per job: " + (USE_TEMP_SCENE_PER_JOB as string))
+    ips_log ("Prefer batch-render submit: " + (PREFER_BATCH_RENDER_SUBMIT as string))
     ips_log ("Dry run: " + (DRY_RUN as string))
 
     if not doesFileExist QUARTZ_MATLIB then
