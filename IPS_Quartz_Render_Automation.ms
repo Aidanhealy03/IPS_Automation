@@ -34,7 +34,7 @@ global SUBMISSION_STABILIZE_MS = 250
    HARDCODED TABLES
    ========================= */
 
-local FINISHES = #(
+global FINISHES = #(
     #("WH", "White_Quartz"),
     #("BL", "Black_Quartz"),
     #("CN", "Concrete_Quartz_02"),
@@ -43,19 +43,19 @@ local FINISHES = #(
     #("BR", "Brown_Quartz_02")
 )
 
-local SIZE_SMALL  = #( "QT-825", "QU-690", "Q-315", "Q-306", "Q-309" )
-local SIZE_MEDIUM = #( "Q-320" )
-local SIZE_LARGE  = #(
+global SIZE_SMALL  = #( "QT-825", "QU-690", "Q-315", "Q-306", "Q-309" )
+global SIZE_MEDIUM = #( "Q-320" )
+global SIZE_LARGE  = #(
     "Q-340", "QU-670", "QU-610", "QU-711", "QU-712", "Q-360R", "QU-710", "QUWS-875", "Q-350",
     "QT-610", "QT-670", "QT-710", "QT-711", "QT-712", "QTWS-875", "QTWS-880", "QUWS-880",
     "QA-740", "QA-750", "QA-760", "QAR-740", "QAR-750", "QAR-760", "QARWS-740", "QAWS-740"
 )
 
-local CAMERAS_SMALL  = #( "Corona Camera001", "Corona Camera002", "Corona Camera003", "Corona Camera004" )
-local CAMERAS_MEDIUM = #( "Corona Camera005", "Corona Camera006", "Corona Camera007", "Corona Camera008" )
-local CAMERAS_LARGE  = #( "Corona Camera009", "Corona Camera010", "Corona Camera011", "Corona Camera012" )
+global CAMERAS_SMALL  = #( "Corona Camera001", "Corona Camera002", "Corona Camera003", "Corona Camera004" )
+global CAMERAS_MEDIUM = #( "Corona Camera005", "Corona Camera006", "Corona Camera007", "Corona Camera008" )
+global CAMERAS_LARGE  = #( "Corona Camera009", "Corona Camera010", "Corona Camera011", "Corona Camera012" )
 
-local VALID_SINK_PREFIXES = #( "QARWS", "QAWS", "QUWS", "QTWS", "QAR", "QA", "QU", "QT", "Q" )
+global VALID_SINK_PREFIXES = #( "QARWS", "QAWS", "QUWS", "QTWS", "QAR", "QA", "QU", "QT", "Q" )
 
 global IPS_LogFilePath = undefined
 
