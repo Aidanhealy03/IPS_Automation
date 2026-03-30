@@ -138,21 +138,74 @@ fn isSinkNodeName nodeName =
     ips_startsWithAny nodeName VALID_SINK_PREFIXES
 )
 
-fn collectAllSinkNodes =
+fn collectAllSinkRootNodes =
 (
-    local sinks = #()
-    for o in geometry do
+    local roots = #()
+    for o in objects do
     (
-        if isValidNode o and isSinkNodeName o.name then append sinks o
+        if isValidNode o and isSinkNodeName o.name then append roots o
     )
-    sinks
+    roots
 )
 
-fn hideAllSinks sinkNodes =
+fn collectNodeHierarchy node =
 (
-    for n in sinkNodes where isValidNode n do
+    local outNodes = #()
+
+    fn walk n outRef =
     (
-        try (n.isHidden = true) catch()
+        if n == undefined or (not isValidNode n) then return undefined
+        append outRef n
+        for c in n.children do walk c outRef
+    )
+
+    walk node outNodes
+    outNodes
+)
+
+fn collectAllSinkNodesIncludingChildren sinkRootNodes =
+(
+    local allNodes = #()
+    for r in sinkRootNodes where isValidNode r do
+    (
+        local branch = collectNodeHierarchy r
+        join allNodes branch
+    )
+    allNodes
+)
+
+fn setHiddenForNodes nodeList hiddenState =
+(
+    for n in nodeList where isValidNode n do
+    (
+        try (n.isHidden = hiddenState) catch()
+    )
+)
+
+fn hideAllSinks sinkRootNodes =
+(
+    local nodes = collectAllSinkNodesIncludingChildren sinkRootNodes
+    setHiddenForNodes nodes true
+)
+
+fn unhideSinkHierarchy sinkNode =
+(
+    local nodes = collectNodeHierarchy sinkNode
+    setHiddenForNodes nodes false
+)
+
+fn selectSinkHierarchy sinkNode =
+(
+    local nodes = collectNodeHierarchy sinkNode
+    try (select nodes) catch()
+)
+
+fn assignMaterialToSinkHierarchy sinkNode matObj =
+(
+    local nodes = collectNodeHierarchy sinkNode
+    for n in nodes where (isValidNode n and isKindOf n GeometryClass) do
+    (
+        try (n.material = matObj) catch()
     )
 )
 
@@ -294,43 +347,62 @@ fn submitViaNetRender tempScenePath jobName managerIP managerPort =
 
     local submitted = false
 
-    -- Best-effort compatibility across Max versions: try several known call patterns.
-    try
-    (
-        execute ("if (isProperty netrender #manager) do (netrender.manager = \"" + managerIP + "\")")
-    ) catch()
+    -- Best-effort compatibility across Max versions:
+    -- try direct calls first, then fallback to execute() variants.
+    try (if isProperty netrender #manager do netrender.manager = managerIP) catch()
+    try (if isProperty netrender #port do netrender.port = managerPort) catch()
 
-    try
+    if not submitted then
     (
-        execute ("if (isProperty netrender #port) do (netrender.port = " + (managerPort as string) + ")")
-    ) catch()
+        try
+        (
+            if isProperty netrender #submitJob then
+            (
+                local r = netrender.submitJob tempScenePath jobName:jobName
+                submitted = (r != undefined and r != false)
+            )
+        ) catch()
+    )
 
-    -- Attempt 1
-    try
+    if not submitted then
     (
-        local cmd = "netrender.submitJob @\"" + tempScenePath + "\" jobName:@\"" + jobName + "\""
-        submitted = execute cmd
-    ) catch()
+        try
+        (
+            if isProperty netrender #submit then
+            (
+                local r2 = netrender.submit tempScenePath jobName
+                submitted = (r2 != undefined and r2 != false)
+            )
+        ) catch()
+    )
 
-    -- Attempt 2
+    if not submitted then
+    (
+        try
+        (
+            local cmd = "netrender.submitJob @\"" + tempScenePath + "\" jobName:@\"" + jobName + "\""
+            local r3 = execute cmd
+            submitted = (r3 != undefined and r3 != false)
+        ) catch()
+    )
+
     if not submitted then
     (
         try
         (
             local cmd2 = "netrender.submit @\"" + tempScenePath + "\" @\"" + jobName + "\""
-            local r2 = execute cmd2
-            submitted = (r2 != undefined)
+            local r4 = execute cmd2
+            submitted = (r4 != undefined and r4 != false)
         ) catch()
     )
 
-    -- Attempt 3 (legacy-style)
     if not submitted then
     (
         try
         (
             local cmd3 = "SubmitToNetwork @\"" + tempScenePath + "\""
-            local r3 = execute cmd3
-            submitted = (r3 != undefined)
+            local r5 = execute cmd3
+            submitted = (r5 != undefined and r5 != false)
         ) catch()
     )
 
@@ -417,8 +489,8 @@ fn allMappedSkus =
         return false
     )
 
-    local sinkNodes = collectAllSinkNodes()
-    ips_log ("Detected sink-like nodes in scene by prefix: " + (sinkNodes.count as string))
+    local sinkRootNodes = collectAllSinkRootNodes()
+    ips_log ("Detected sink root nodes in scene by prefix: " + (sinkRootNodes.count as string))
 
     local skus = allMappedSkus()
     totalSkus = skus.count
@@ -494,9 +566,10 @@ fn allMappedSkus =
 
             try
             (
-                hideAllSinks sinkNodes
-                skuNode.isHidden = false
-                skuNode.material = qMat
+                hideAllSinks sinkRootNodes
+                selectSinkHierarchy skuNode -- ensures group children are included as requested
+                unhideSinkHierarchy skuNode
+                assignMaterialToSinkHierarchy skuNode qMat
                 completeRedraw()
             )
             catch
@@ -532,10 +605,10 @@ fn allMappedSkus =
             )
         )
 
-        try (skuNode.isHidden = true) catch()
+        try (setHiddenForNodes (collectNodeHierarchy skuNode) true) catch()
     )
 
-    hideAllSinks sinkNodes
+    hideAllSinks sinkRootNodes
 
     ips_log "----------------------------------------"
     ips_log "FINAL SUMMARY"
