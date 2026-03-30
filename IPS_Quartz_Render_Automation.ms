@@ -27,7 +27,7 @@ global BACKBURNER_MANAGER = "10.10.0.59"
 global BACKBURNER_PORT    = 3234 -- default Backburner port
 global TEMP_SCENE_FOLDER  = @"R:\Aidan\IPS\_TempScenes"
 global DRY_RUN            = false
-global USE_TEMP_SCENE_PER_JOB = true
+global USE_TEMP_SCENE_PER_JOB = false
 global SUBMISSION_STABILIZE_MS = 250
 global PREFER_BATCH_RENDER_SUBMIT = true
 global CMDJOB_EXE         = @"C:\Program Files (x86)\Autodesk\Backburner\cmdjob.exe"
@@ -394,6 +394,45 @@ fn submitViaCmdJob tempScenePath jobName cameraName outputPath width height =
     result
 )
 
+fn submitFinishBatchViaCmdJob scenePath sku finishCode cameraNodes =
+(
+    if DRY_RUN then return cameraNodes.count
+    if (not doesFileExist CMDJOB_EXE) then return 0
+    if (not doesFileExist MAXCMD_EXE) then return 0
+
+    local batchJobName = sku + "_" + finishCode + "_IPS_BATCH"
+    local bbCmd = quoteArg CMDJOB_EXE + \
+        " -manager:" + BACKBURNER_MANAGER + \
+        " -port:" + (BACKBURNER_PORT as string) + \
+        " -jobName:" + quoteArg batchJobName + \
+        " -priority:" + (CMDJOB_PRIORITY as string)
+
+    for i = 1 to cameraNodes.count do
+    (
+        local camName = cameraNodes[i].name
+        local outPath = buildOutputFilePath sku finishCode i
+        local taskCmd = quoteArg MAXCMD_EXE + " " + quoteArg scenePath + \
+            " -camera:" + quoteArg camName + \
+            " -outputName:" + quoteArg outPath + \
+            " -w:" + (RENDER_WIDTH as string) + \
+            " -h:" + (RENDER_HEIGHT as string)
+
+        bbCmd += " -taskName:" + quoteArg (sku + "_" + finishCode + "_IPS" + (formattedPrint i format:"02d"))
+        bbCmd += " -task:" + quoteArg taskCmd
+    )
+
+    ips_log ("CMDJOB batch submit command: " + bbCmd)
+
+    local ok = false
+    try
+    (
+        local rc = DOSCommand bbCmd
+        ok = (rc == 0 or rc == true)
+    ) catch (ok = false)
+
+    if ok then cameraNodes.count else 0
+)
+
 fn submitViaNetRender tempScenePath jobName managerIP managerPort =
 (
     if DRY_RUN then return true
@@ -521,6 +560,22 @@ fn submitBackburnerJob camNode outputPath jobName =
     )
 
     success
+)
+
+fn getSubmissionScenePathForCurrentState sku finishCode =
+(
+    local submissionScene = maxFilePath + maxFileName
+
+    if USE_TEMP_SCENE_PER_JOB then
+    (
+        local tempScene = buildTempScenePath (sku + "_" + finishCode + "_STATE")
+        if saveTempSceneSnapshot tempScene then
+            submissionScene = tempScene
+        else
+            ips_log ("WARN: Temp scene snapshot failed, using current scene path: " + submissionScene)
+    )
+
+    submissionScene
 )
 
 fn allMappedSkus =
@@ -665,28 +720,42 @@ fn allMappedSkus =
                 continue
             )
 
-            for i = 1 to 4 do
+            local submissionScene = getSubmissionScenePathForCurrentState sku finishCode
+
+            -- Preferred flow: one batch submission per finish containing all 4 camera tasks.
+            jobsAttempted += 4
+            local batchSubmittedCount = submitFinishBatchViaCmdJob submissionScene sku finishCode cameraNodes
+
+            if batchSubmittedCount == 4 then
             (
-                local camNode = cameraNodes[i]
-                local outputPath = buildOutputFilePath sku finishCode i
-                local jobName = sku + "_" + finishCode + "_IPS" + (formattedPrint i format:"02d")
-
-                jobsAttempted += 1
-                ips_log ("Submitting camera " + camNode.name + " as job " + jobName)
-                ips_log ("Output path: " + outputPath)
-
-                local ok = false
-                try (ok = submitBackburnerJob camNode outputPath jobName) catch (ok = false)
-
-                if ok then
+                jobsSubmitted += 4
+                ips_log ("SUBMITTED BATCH: " + sku + " " + finishCode + " (4 camera tasks)")
+            )
+            else
+            (
+                ips_log ("WARN: Batch submit unavailable/failed, falling back to per-camera submission.")
+                for i = 1 to 4 do
                 (
-                    jobsSubmitted += 1
-                    ips_log ("SUBMITTED: " + jobName)
-                )
-                else
-                (
-                    errorCount += 1
-                    ips_log ("ERROR: Backburner submission failed for " + jobName)
+                    local camNode = cameraNodes[i]
+                    local outputPath = buildOutputFilePath sku finishCode i
+                    local jobName = sku + "_" + finishCode + "_IPS" + (formattedPrint i format:"02d")
+
+                    ips_log ("Submitting camera " + camNode.name + " as job " + jobName)
+                    ips_log ("Output path: " + outputPath)
+
+                    local ok = false
+                    try (ok = submitBackburnerJob camNode outputPath jobName) catch (ok = false)
+
+                    if ok then
+                    (
+                        jobsSubmitted += 1
+                        ips_log ("SUBMITTED: " + jobName)
+                    )
+                    else
+                    (
+                        errorCount += 1
+                        ips_log ("ERROR: Backburner submission failed for " + jobName)
+                    )
                 )
             )
         )
