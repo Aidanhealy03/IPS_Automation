@@ -31,6 +31,7 @@ global USE_TEMP_SCENE_PER_JOB = false
 global SUBMISSION_STABILIZE_MS = 250
 global PREFER_BATCH_RENDER_SUBMIT = true
 global CONFIGURE_BATCH_WINDOW = true
+global USE_IGR_BATCH_METHOD = true -- preferred: submit via batchRenderMgr (IGR-style)
 global CMDJOB_EXE         = @"" -- leave blank to auto-detect
 global MAXCMD_EXE         = @"" -- leave blank to auto-detect (recommended)
 global CMDJOB_PRIORITY    = 50
@@ -678,6 +679,46 @@ fn configureBatchRenderForFinish sku finishCode cameraNodes =
     configured
 )
 
+fn submitViaIgrBatchServerMethod sku finishCode cameraNodes =
+(
+    if DRY_RUN then return cameraNodes.count
+    if not USE_IGR_BATCH_METHOD then return 0
+
+    local submitted = false
+    local jobName = sku + "_" + finishCode + "_IPS_BATCH"
+
+    -- Try to set a job name if API exposes one.
+    try (execute ("if (batchRenderMgr != undefined and isProperty batchRenderMgr #jobName) do (batchRenderMgr.jobName = @\"" + jobName + "\")")) catch()
+    try (execute ("if (batchRenderMgr != undefined and isProperty batchRenderMgr #JobName) do (batchRenderMgr.JobName = @\"" + jobName + "\")")) catch()
+
+    -- Try common batch net-render submit entry points (no scene path args).
+    try
+    (
+        local rA = execute "if (batchRenderMgr != undefined and isProperty batchRenderMgr #netRender) then batchRenderMgr.netRender() else false"
+        submitted = (rA != undefined and rA != false)
+    ) catch()
+
+    if not submitted then
+    (
+        try
+        (
+            local rB = execute "if (batchRenderMgr != undefined and isProperty batchRenderMgr #submitToNetwork) then batchRenderMgr.submitToNetwork() else false"
+            submitted = (rB != undefined and rB != false)
+        ) catch()
+    )
+
+    if not submitted then
+    (
+        try
+        (
+            local rC = execute "if (batchRenderMgr != undefined and isProperty batchRenderMgr #SubmitToNetwork) then batchRenderMgr.SubmitToNetwork() else false"
+            submitted = (rC != undefined and rC != false)
+        ) catch()
+    )
+
+    if submitted then cameraNodes.count else 0
+)
+
 fn submitBackburnerJob camNode outputPath jobName =
 (
     local success = false
@@ -759,6 +800,7 @@ fn allMappedSkus =
     ips_log ("Use temp scene per job: " + (USE_TEMP_SCENE_PER_JOB as string))
     ips_log ("Prefer batch-render submit: " + (PREFER_BATCH_RENDER_SUBMIT as string))
     ips_log ("Configure Batch Render window: " + (CONFIGURE_BATCH_WINDOW as string))
+    ips_log ("Use IGR batch server method: " + (USE_IGR_BATCH_METHOD as string))
     ips_log ("CMDJOB path: " + CMDJOB_EXE)
     ips_log ("3dsmaxcmd path: " + MAXCMD_EXE)
     ips_log ("Dry run: " + (DRY_RUN as string))
@@ -887,7 +929,9 @@ fn allMappedSkus =
 
             -- Preferred flow: one batch submission per finish containing all 4 camera tasks.
             jobsAttempted += 4
-            local batchSubmittedCount = submitFinishBatchViaCmdJob submissionScene sku finishCode cameraNodes
+            local batchSubmittedCount = submitViaIgrBatchServerMethod sku finishCode cameraNodes
+            if batchSubmittedCount != 4 do
+                batchSubmittedCount = submitFinishBatchViaCmdJob submissionScene sku finishCode cameraNodes
 
             if batchSubmittedCount == 4 then
             (
