@@ -80,6 +80,15 @@ fn getAllSinkNodes = (
     arr
 )
 
+fn getManagedSinkRoots = (
+    local arr = #()
+    for sku in ALL_SKUS do (
+        local n = getNodeByName sku exact:true
+        if n != undefined do append arr n
+    )
+    arr
+)
+
 fn getSizeGroup sku = (
     for s in SMALL_SKUS do if s == sku then return "SMALL"
     for s in MEDIUM_SKUS do if s == sku then return "MEDIUM"
@@ -115,6 +124,13 @@ fn unhideSinkHierarchy sinkNode = (
     local nodes = collectHierarchy sinkNode
     try(select nodes)catch()
     for n in nodes do try(n.isHidden = false)catch()
+)
+
+fn hideAllSinkHierarchies sinkRootArr = (
+    for r in sinkRootArr where isValidNode r do (
+        local nodes = collectHierarchy r
+        for n in nodes do try(n.isHidden = true)catch()
+    )
 )
 
 fn assignMaterialHierarchy sinkNode matObj = (
@@ -156,6 +172,25 @@ fn setJpgQuality = (
     try (JPEGIO.setQuality JPG_QUALITY) catch()
 )
 
+fn configureBatchNetRender managerIp = (
+    try (batchRenderMgr.netRender = true) catch()
+    try (batchRenderMgr.networkRender = true) catch()
+    try (batchRenderMgr.useNetRender = true) catch()
+    try (batchRenderMgr.managerAddress = managerIp) catch()
+    try (batchRenderMgr.manager = managerIp) catch()
+    try (batchRenderMgr.serverName = managerIp) catch()
+    try (execute "if (batchRenderMgr != undefined and isProperty batchRenderMgr #netRender) do (batchRenderMgr.netRender = true)") catch()
+    try (execute "if (batchRenderMgr != undefined and isProperty batchRenderMgr #networkRender) do (batchRenderMgr.networkRender = true)") catch()
+    try (execute ("if (batchRenderMgr != undefined and isProperty batchRenderMgr #managerAddress) do (batchRenderMgr.managerAddress = \"" + managerIp + "\")")) catch()
+)
+
+fn isBatchNetRenderEnabled = (
+    local enabled = false
+    try (if batchRenderMgr.netRender == true then enabled = true) catch()
+    try (if batchRenderMgr.networkRender == true then enabled = true) catch()
+    enabled
+)
+
 /* =========================
    MAIN
    ========================= */
@@ -181,7 +216,9 @@ fn setJpgQuality = (
     )
 
     local allSinks = getAllSinkNodes()
+    local managedSinkRoots = getManagedSinkRoots()
     logMsg ("Sink nodes in scene: " + allSinks.count as string)
+    logMsg ("Managed sink roots from SKU table: " + managedSinkRoots.count as string)
 
     for sku in ALL_SKUS do (
         logMsg "------------------------------------------------------------"
@@ -214,7 +251,7 @@ fn setJpgQuality = (
             local mat = getMatByName matName
             if mat == undefined then (g_errors += 1; logMsg "    [SKIP] Material missing"; continue)
 
-            hideAllSinks allSinks
+            hideAllSinkHierarchies managedSinkRoots
             unhideSinkHierarchy sinkNode
             assignMaterialHierarchy sinkNode mat
             setJpgQuality()
@@ -264,8 +301,8 @@ fn setJpgQuality = (
             else (
                 try (
                     batchRenderMgr.renderSceneFilename = tempPath
-                    batchRenderMgr.netRender = true
-                    batchRenderMgr.managerAddress = BACKBURNER_MANAGER
+                    configureBatchNetRender BACKBURNER_MANAGER
+                    if not isBatchNetRenderEnabled() then logMsg "    [WARN] Could not verify Net Render flag ON before submit."
                     batchRenderMgr.render()
                     g_jobsOK += 4
                     logMsg ("    [OK] Submitted batch: " + sku + "_" + finCode)
@@ -278,7 +315,7 @@ fn setJpgQuality = (
         )
 
         clearBatchViews()
-        hideAllSinks allSinks
+        hideAllSinkHierarchies managedSinkRoots
     )
 
     for n in allSinks do try(n.isHidden = false)catch()
