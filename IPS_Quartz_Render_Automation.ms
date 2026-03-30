@@ -65,13 +65,17 @@ global IPS_LogFilePath = undefined
 
 fn ips_timeStamp =
 (
-    local d = localTime
-    (formattedPrint d.year format:"04d") + "-" +
-    (formattedPrint d.month format:"02d") + "-" +
-    (formattedPrint d.day format:"02d") + " " +
-    (formattedPrint d.hour format:"02d") + ":" +
-    (formattedPrint d.minute format:"02d") + ":" +
-    (formattedPrint d.second format:"02d")
+    -- localTime returns a display string in many 3ds Max versions.
+    (localTime as string)
+)
+
+fn ips_fileSafeStamp =
+(
+    local s = ips_timeStamp()
+    s = substituteString s "/" "-"
+    s = substituteString s ":" "-"
+    s = substituteString s " " "_"
+    s
 )
 
 fn ips_safeMakeDir path =
@@ -85,7 +89,7 @@ fn ips_initLogFile =
 (
     if ips_safeMakeDir OUTPUT_ROOT then
     (
-        IPS_LogFilePath = OUTPUT_ROOT + "\\IPS_Backburner_Log_" + substituteString (ips_timeStamp()) ":" "-" + ".txt"
+        IPS_LogFilePath = OUTPUT_ROOT + "\\IPS_Backburner_Log_" + ips_fileSafeStamp() + ".txt"
         try
         (
             local f = createFile IPS_LogFilePath
