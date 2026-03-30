@@ -401,6 +401,11 @@ fn runDosCommandSuccess cmdLine =
     ok
 )
 
+fn escapeInnerQuotes s =
+(
+    substituteString s "\"" "\\\""
+)
+
 fn submitViaCmdJob tempScenePath jobName cameraName outputPath width height =
 (
     if DRY_RUN then return true
@@ -430,6 +435,7 @@ fn submitViaCmdJob tempScenePath jobName cameraName outputPath width height =
         " -outputName:" + quoteArg outputPath + \
         " -w:" + (width as string) + \
         " -h:" + (height as string)
+    local taskEsc = escapeInnerQuotes taskCmd
 
     -- Try multiple cmdjob syntaxes because switch formats vary by Backburner version.
     local bbCmdA = quoteArg CMDJOB_EXE + \
@@ -437,14 +443,14 @@ fn submitViaCmdJob tempScenePath jobName cameraName outputPath width height =
         " -port:" + (BACKBURNER_PORT as string) + \
         " -jobName:" + quoteArg jobName + \
         " -priority:" + (CMDJOB_PRIORITY as string) + \
-        " -taskName:1 -task:" + quoteArg taskCmd
+        " -taskName:1 -task:" + quoteArg taskEsc
 
     local bbCmdB = quoteArg CMDJOB_EXE + \
         " -manager " + quoteArg BACKBURNER_MANAGER + \
         " -port " + (BACKBURNER_PORT as string) + \
         " -jobName " + quoteArg jobName + \
         " -priority " + (CMDJOB_PRIORITY as string) + \
-        " -taskName " + quoteArg "1" + " -task " + quoteArg taskCmd
+        " -taskName " + quoteArg "1" + " -task " + quoteArg taskEsc
 
     ips_log ("CMDJOB submit command A: " + bbCmdA)
     local result = runDosCommandSuccess bbCmdA
@@ -489,10 +495,11 @@ fn submitFinishBatchViaCmdJob scenePath sku finishCode cameraNodes =
             " -outputName:" + quoteArg outPath + \
             " -w:" + (RENDER_WIDTH as string) + \
             " -h:" + (RENDER_HEIGHT as string)
+        local taskEsc = escapeInnerQuotes taskCmd
 
         local tName = (sku + "_" + finishCode + "_IPS" + (formattedPrint i format:"02d"))
-        bbCmdA += " -taskName:" + quoteArg tName + " -task:" + quoteArg taskCmd
-        bbCmdB += " -taskName " + quoteArg tName + " -task " + quoteArg taskCmd
+        bbCmdA += " -taskName:" + quoteArg tName + " -task:" + quoteArg taskEsc
+        bbCmdB += " -taskName " + quoteArg tName + " -task " + quoteArg taskEsc
     )
 
     ips_log ("CMDJOB batch submit command A: " + bbCmdA)
@@ -631,13 +638,42 @@ fn configureBatchRenderForFinish sku finishCode cameraNodes =
             local cmdB = "if (batchRenderMgr != undefined and isProperty batchRenderMgr #createView) then (local v = batchRenderMgr.createView(); if v != undefined do (v.name=@\"" + viewName + "\"; v.camera=" + camExpr + "; if isProperty v #outputFilename do v.outputFilename=@\"" + outPath + "\"; if isProperty v #width do v.width=" + (RENDER_WIDTH as string) + "; if isProperty v #height do v.height=" + (RENDER_HEIGHT as string) + "; if isProperty v #enabled do v.enabled=true; true) else false) else false"
             local okB = false
             try (okB = execute cmdB) catch (okB = false)
-            if okB == true then configured = true
+            if okB == false then
+            (
+                -- Variant C: AddView positional
+                local cmdC = "if (batchRenderMgr != undefined and isProperty batchRenderMgr #AddView) then (batchRenderMgr.AddView @\"" + viewName + "\" " + camExpr + " @\"" + outPath + "\" " + (RENDER_WIDTH as string) + " " + (RENDER_HEIGHT as string) + ") else false"
+                local okC = false
+                try (okC = execute cmdC) catch (okC = false)
+
+                if okC == false then
+                (
+                    -- Variant D: addView positional
+                    local cmdD = "if (batchRenderMgr != undefined and isProperty batchRenderMgr #addView) then (batchRenderMgr.addView @\"" + viewName + "\" " + camExpr + " @\"" + outPath + "\" " + (RENDER_WIDTH as string) + " " + (RENDER_HEIGHT as string) + ") else false"
+                    local okD = false
+                    try (okD = execute cmdD) catch (okD = false)
+                    if okD == true then configured = true
+                )
+                else configured = true
+            )
+            else configured = true
         )
         else
         (
             configured = true
         )
     )
+
+    -- Final verify if manager exposes count.
+    try
+    (
+        local countA = execute "if (batchRenderMgr != undefined and isProperty batchRenderMgr #numViews) then batchRenderMgr.numViews else -1"
+        if countA != undefined and countA >= cameraNodes.count then configured = true
+    ) catch()
+    try
+    (
+        local countB = execute "if (batchRenderMgr != undefined and isProperty batchRenderMgr #GetViewCount) then batchRenderMgr.GetViewCount() else -1"
+        if countB != undefined and countB >= cameraNodes.count then configured = true
+    ) catch()
 
     configured
 )
