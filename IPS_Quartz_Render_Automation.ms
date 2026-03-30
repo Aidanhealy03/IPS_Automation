@@ -32,6 +32,8 @@ global SUBMISSION_STABILIZE_MS = 250
 global PREFER_BATCH_RENDER_SUBMIT = true
 global CONFIGURE_BATCH_WINDOW = true
 global USE_IGR_BATCH_METHOD = true -- preferred: submit via batchRenderMgr (IGR-style)
+global USE_CUSTOM_SUBMIT_COMMAND = false -- set true to use exact studio-proven command template
+global CUSTOM_BATCH_COMMAND_TEMPLATE = "" -- supports tokens: {CMDJOB_EXE},{MANAGER},{PORT},{JOB_NAME},{PRIORITY},{TASK_ARGS}
 global CMDJOB_EXE         = @"" -- leave blank to auto-detect
 global MAXCMD_EXE         = @"" -- leave blank to auto-detect (recommended)
 global CMDJOB_PRIORITY    = 50
@@ -407,6 +409,23 @@ fn escapeInnerQuotes s =
     substituteString s "\"" "\\\""
 )
 
+fn applyToken template token value =
+(
+    substituteString template token value
+)
+
+fn buildCustomBatchCommand template cmdjobExe manager port jobName priority taskArgs =
+(
+    local c = template
+    c = applyToken c "{CMDJOB_EXE}" cmdjobExe
+    c = applyToken c "{MANAGER}" manager
+    c = applyToken c "{PORT}" (port as string)
+    c = applyToken c "{JOB_NAME}" jobName
+    c = applyToken c "{PRIORITY}" (priority as string)
+    c = applyToken c "{TASK_ARGS}" taskArgs
+    c
+)
+
 fn submitViaCmdJob tempScenePath jobName cameraName outputPath width height =
 (
     if DRY_RUN then return true
@@ -486,6 +505,8 @@ fn submitFinishBatchViaCmdJob scenePath sku finishCode cameraNodes =
 
     local bbCmdA = bbCmdBaseA
     local bbCmdB = bbCmdBaseB
+    local taskArgsA = ""
+    local taskArgsB = ""
 
     for i = 1 to cameraNodes.count do
     (
@@ -501,6 +522,16 @@ fn submitFinishBatchViaCmdJob scenePath sku finishCode cameraNodes =
         local tName = (sku + "_" + finishCode + "_IPS" + (formattedPrint i format:"02d"))
         bbCmdA += " -taskName:" + quoteArg tName + " -task:" + quoteArg taskEsc
         bbCmdB += " -taskName " + quoteArg tName + " -task " + quoteArg taskEsc
+        taskArgsA += " -taskName:" + quoteArg tName + " -task:" + quoteArg taskEsc
+        taskArgsB += " -taskName " + quoteArg tName + " -task " + quoteArg taskEsc
+    )
+
+    if USE_CUSTOM_SUBMIT_COMMAND and CUSTOM_BATCH_COMMAND_TEMPLATE != "" then
+    (
+        local customCmd = buildCustomBatchCommand CUSTOM_BATCH_COMMAND_TEMPLATE CMDJOB_EXE BACKBURNER_MANAGER BACKBURNER_PORT batchJobName CMDJOB_PRIORITY taskArgsA
+        ips_log ("CUSTOM submit command: " + customCmd)
+        local okCustom = runDosCommandSuccess customCmd
+        if okCustom then return cameraNodes.count
     )
 
     ips_log ("CMDJOB batch submit command A: " + bbCmdA)
@@ -801,6 +832,7 @@ fn allMappedSkus =
     ips_log ("Prefer batch-render submit: " + (PREFER_BATCH_RENDER_SUBMIT as string))
     ips_log ("Configure Batch Render window: " + (CONFIGURE_BATCH_WINDOW as string))
     ips_log ("Use IGR batch server method: " + (USE_IGR_BATCH_METHOD as string))
+    ips_log ("Use custom submit command: " + (USE_CUSTOM_SUBMIT_COMMAND as string))
     ips_log ("CMDJOB path: " + CMDJOB_EXE)
     ips_log ("3dsmaxcmd path: " + MAXCMD_EXE)
     ips_log ("Dry run: " + (DRY_RUN as string))
