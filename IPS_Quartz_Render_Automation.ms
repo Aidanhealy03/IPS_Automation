@@ -1,1017 +1,296 @@
-/*
-    IPS Quartz Sink Backburner Submission (Production-Safe)
-    ------------------------------------------------------
-    Purpose:
-    - Process ONLY the currently open scene (no scene-file opening).
-    - Find sinks by exact SKU node name.
-    - Enforce visibility (hide all sinks, show only current sink).
-    - Apply quartz finish materials.
-    - Set camera/output state and submit EACH render to Backburner.
-
-    Reliability note:
-    - By default, each job is submitted from a TEMP saved scene file to prevent
-      queued jobs from inheriting later scene changes.
-    - This is intentionally safer for large queue submissions.
-*/
+-- =============================================================================
+-- IPS_Quartz_Render_Automation.ms
+-- Batch Render -> Net Render (Backburner) workflow
+--
+-- Uses the same core method as the provided IGR script:
+--   1) Set scene state (hide all sinks, unhide one sink, assign finish)
+--   2) Save frozen temp scene per SKU+finish
+--   3) Build 4 Batch Render views (camera + output file)
+--   4) Enable Net Render and submit via batchRenderMgr.render()
+-- =============================================================================
 
 /* =========================
-   USER-EDITABLE SETTINGS
+   USER SETTINGS
    ========================= */
-global OUTPUT_ROOT        = @"R:\Aidan\IPS"
-global QUARTZ_MATLIB      = @"R:\Creative\3D Library\3D Library\Material Library\Quartz.mat"
-global RENDER_WIDTH       = 2000
-global RENDER_HEIGHT      = 2000
-global JPG_QUALITY        = 100
+OUTPUT_ROOT        = @"R:\Aidan\IPS"
+QUARTZ_MATLIB      = @"R:\Creative\3D Library\3D Library\Material Library\Quartz.mat"
+BACKBURNER_MANAGER = "10.10.0.59"
+TEMP_SCENE_FOLDER  = @"R:\Aidan\IPS\_TempScenes"
+RENDER_WIDTH       = 2000
+RENDER_HEIGHT      = 2000
+JPG_QUALITY        = 100
+DRY_RUN            = false
 
-global BACKBURNER_MANAGER = "10.10.0.59"
-global BACKBURNER_PORT    = 3234 -- default Backburner port
-global TEMP_SCENE_FOLDER  = @"R:\Aidan\IPS\_TempScenes"
-global DRY_RUN            = false
-global USE_TEMP_SCENE_PER_JOB = false
-global SUBMISSION_STABILIZE_MS = 250
-global PREFER_BATCH_RENDER_SUBMIT = true
-global CONFIGURE_BATCH_WINDOW = true
-global USE_IGR_BATCH_METHOD = true -- preferred: submit via batchRenderMgr (IGR-style)
-global USE_CUSTOM_SUBMIT_COMMAND = false -- set true to use exact studio-proven command template
-global CUSTOM_BATCH_COMMAND_TEMPLATE = "" -- supports tokens: {CMDJOB_EXE},{MANAGER},{PORT},{JOB_NAME},{PRIORITY},{TASK_ARGS}
-global CMDJOB_EXE         = @"" -- leave blank to auto-detect
-global MAXCMD_EXE         = @"" -- leave blank to auto-detect (recommended)
-global CMDJOB_PRIORITY    = 50
-global LOGGED_MISSING_CMDJOB = false
-global LOGGED_MISSING_MAXCMD = false
+LOG_FILE_PATH = OUTPUT_ROOT + "\\IPS_RenderLog.txt"
 
 /* =========================
-   HARDCODED TABLES
+   HARD CODED TABLES
    ========================= */
+FINISH_CODES = #("WH","BL","CN","GR","BI","BR")
+FINISH_MATS  = #("White_Quartz","Black_Quartz","Concrete_Quartz_02","Grey_Quartz_02","Bisque_Quartz_02","Brown_Quartz_02")
 
-global FINISHES = #(
-    #("WH", "White_Quartz"),
-    #("BL", "Black_Quartz"),
-    #("CN", "Concrete_Quartz_02"),
-    #("GR", "Grey_Quartz_02"),
-    #("BI", "Bisque_Quartz_02"),
-    #("BR", "Brown_Quartz_02")
+SMALL_CAMERAS  = #("Corona Camera001","Corona Camera002","Corona Camera003","Corona Camera004")
+MEDIUM_CAMERAS = #("Corona Camera005","Corona Camera006","Corona Camera007","Corona Camera008")
+LARGE_CAMERAS  = #("Corona Camera009","Corona Camera010","Corona Camera011","Corona Camera012")
+
+SMALL_SKUS = #("QT-825","QU-690","Q-315","Q-306","Q-309")
+MEDIUM_SKUS = #("Q-320")
+LARGE_SKUS = #(
+    "Q-340","QU-670","QU-610","QU-711","QU-712","Q-360R","QU-710","QUWS-875","Q-350",
+    "QT-610","QT-670","QT-710","QT-711","QT-712","QTWS-875","QTWS-880","QUWS-880",
+    "QA-740","QA-750","QA-760","QAR-740","QAR-750","QAR-760","QARWS-740","QAWS-740"
 )
 
-global SIZE_SMALL  = #( "QT-825", "QU-690", "Q-315", "Q-306", "Q-309" )
-global SIZE_MEDIUM = #( "Q-320" )
-global SIZE_LARGE  = #(
-    "Q-340", "QU-670", "QU-610", "QU-711", "QU-712", "Q-360R", "QU-710", "QUWS-875", "Q-350",
-    "QT-610", "QT-670", "QT-710", "QT-711", "QT-712", "QTWS-875", "QTWS-880", "QUWS-880",
-    "QA-740", "QA-750", "QA-760", "QAR-740", "QAR-750", "QAR-760", "QARWS-740", "QAWS-740"
-)
-
-global CAMERAS_SMALL  = #( "Corona Camera001", "Corona Camera002", "Corona Camera003", "Corona Camera004" )
-global CAMERAS_MEDIUM = #( "Corona Camera005", "Corona Camera006", "Corona Camera007", "Corona Camera008" )
-global CAMERAS_LARGE  = #( "Corona Camera009", "Corona Camera010", "Corona Camera011", "Corona Camera012" )
-
-global VALID_SINK_PREFIXES = #( "QARWS", "QAWS", "QUWS", "QTWS", "QAR", "QA", "QU", "QT", "Q" )
-
-global IPS_LogFilePath = undefined
+SINK_PREFIXES = #("QARWS","QUWS","QTWS","QAWS","QAR","QA","QU","QT","Q")
 
 /* =========================
-   LOGGING
+   GLOBAL STATE
    ========================= */
-
-fn ips_timeStamp =
-(
-    -- localTime returns a display string in many 3ds Max versions.
-    (localTime as string)
-)
-
-fn ips_fileSafeStamp =
-(
-    local s = ips_timeStamp()
-    s = substituteString s "/" "-"
-    s = substituteString s ":" "-"
-    s = substituteString s " " "_"
-    s
-)
-
-fn ips_safeMakeDir path =
-(
-    if path == undefined or path == "" then return false
-    if doesDirectoryExist path then return true
-    makeDir path
-)
-
-fn firstExistingPath candidates =
-(
-    for p in candidates do
-    (
-        if p != undefined and p != "" and doesFileExist p do return p
-    )
-    ""
-)
-
-fn resolveToolPaths =
-(
-    local maxRoot = ""
-    try (maxRoot = getDir #maxroot) catch (maxRoot = "")
-
-    if (MAXCMD_EXE == undefined or MAXCMD_EXE == "" or not doesFileExist MAXCMD_EXE) then
-    (
-        local maxCmdCandidates = #(
-            (maxRoot + @"3dsmaxcmd.exe"),
-            @"C:\Program Files\Autodesk\3ds Max 2026\3dsmaxcmd.exe",
-            @"C:\Program Files\Autodesk\3ds Max 2025\3dsmaxcmd.exe",
-            @"C:\Program Files\Autodesk\3ds Max 2024\3dsmaxcmd.exe",
-            @"C:\Program Files\Autodesk\3ds Max 2023\3dsmaxcmd.exe",
-            @"C:\Program Files\Autodesk\3ds Max\3dsmaxcmd.exe"
-        )
-        MAXCMD_EXE = firstExistingPath maxCmdCandidates
-    )
-
-    if (CMDJOB_EXE == undefined or CMDJOB_EXE == "" or not doesFileExist CMDJOB_EXE) then
-    (
-        local bbCandidates = #(
-            (maxRoot + @"Backburner\cmdjob.exe"),
-            @"C:\Program Files (x86)\Autodesk\Backburner\cmdjob.exe",
-            @"C:\Program Files\Autodesk\Backburner\cmdjob.exe"
-        )
-        CMDJOB_EXE = firstExistingPath bbCandidates
-    )
-)
-
-fn ips_initLogFile =
-(
-    if ips_safeMakeDir OUTPUT_ROOT then
-    (
-        IPS_LogFilePath = OUTPUT_ROOT + "\\IPS_Backburner_Log_" + ips_fileSafeStamp() + ".txt"
-        try
-        (
-            local f = createFile IPS_LogFilePath
-            format "IPS Quartz Backburner Log\n" to:f
-            close f
-        )
-        catch (IPS_LogFilePath = undefined)
-    )
-)
-
-fn ips_log msg =
-(
-    local line = "[" + ips_timeStamp() + "] " + msg
-    format "%\n" line
-
-    if IPS_LogFilePath != undefined then
-    (
-        try
-        (
-            local f = openFile IPS_LogFilePath mode:"a"
-            format "%\n" line to:f
-            close f
-        )
-        catch()
-    )
-)
+ALL_SKUS = #()
+g_totalSKUs = 0
+g_foundSKUs = 0
+g_skippedSKUs = 0
+g_jobsTried = 0
+g_jobsOK = 0
+g_errors = 0
+g_logStream = undefined
+g_matLib = undefined
 
 /* =========================
    HELPERS
    ========================= */
+fn logMsg msg = (
+    format "%\n" msg
+    if g_logStream != undefined do (try (format "%\n" msg to:g_logStream; flush g_logStream) catch())
+)
 
-fn ips_startsWithAny source prefixes =
-(
-    if source == undefined then return false
-    local upperName = toUpper source
-    for p in prefixes do
-    (
-        local pUpper = toUpper p
-        if matchPattern upperName pattern:(pUpper + "*") ignoreCase:true do return true
-    )
+fn ensureFolder p = (
+    if doesFileExist p then return true
+    try (makeDir p all:true; doesFileExist p) catch (false)
+)
+
+fn isSinkNode nodeName = (
+    for pfx in SINK_PREFIXES do if matchPattern nodeName pattern:(pfx + "*") do return true
     false
 )
 
-fn isSinkNodeName nodeName =
-(
-    ips_startsWithAny nodeName VALID_SINK_PREFIXES
+fn getAllSinkNodes = (
+    local arr = #()
+    for n in objects where isSinkNode n.name do append arr n
+    arr
 )
 
-fn collectAllSinkRootNodes =
-(
-    local roots = #()
-    for o in objects do
-    (
-        if isValidNode o and isSinkNodeName o.name then append roots o
-    )
-    roots
+fn getSizeGroup sku = (
+    for s in SMALL_SKUS do if s == sku then return "SMALL"
+    for s in MEDIUM_SKUS do if s == sku then return "MEDIUM"
+    for s in LARGE_SKUS do if s == sku then return "LARGE"
+    ""
 )
 
-fn collectNodeHierarchyWalk n outRef =
-(
-    if n == undefined or (not isValidNode n) then return undefined
-    append outRef n
-    for c in n.children do collectNodeHierarchyWalk c outRef
-)
-
-fn collectNodeHierarchy node =
-(
-    local outNodes = #()
-    collectNodeHierarchyWalk node outNodes
-    outNodes
-)
-
-fn collectAllSinkNodesIncludingChildren sinkRootNodes =
-(
-    local allNodes = #()
-    for r in sinkRootNodes where isValidNode r do
-    (
-        local branch = collectNodeHierarchy r
-        join allNodes branch
-    )
-    allNodes
-)
-
-fn setHiddenForNodes nodeList hiddenState =
-(
-    for n in nodeList where isValidNode n do
-    (
-        try (n.isHidden = hiddenState) catch()
+fn getCamNamesForGroup grp = (
+    case grp of (
+        "SMALL": SMALL_CAMERAS
+        "MEDIUM": MEDIUM_CAMERAS
+        "LARGE": LARGE_CAMERAS
+        default: #()
     )
 )
 
-fn hideAllSinks sinkRootNodes =
-(
-    local nodes = collectAllSinkNodesIncludingChildren sinkRootNodes
-    setHiddenForNodes nodes true
-)
+fn hideAllSinks sinkArr = (for n in sinkArr do try(n.isHidden = true)catch())
 
-fn unhideSinkHierarchy sinkNode =
-(
-    local nodes = collectNodeHierarchy sinkNode
-    setHiddenForNodes nodes false
-)
-
-fn selectSinkHierarchy sinkNode =
-(
-    local nodes = collectNodeHierarchy sinkNode
-    try (select nodes) catch()
-)
-
-fn assignMaterialToSinkHierarchy sinkNode matObj =
-(
-    local nodes = collectNodeHierarchy sinkNode
-    for n in nodes where (isValidNode n and isKindOf n GeometryClass) do
-    (
-        try (n.material = matObj) catch()
+fn collectHierarchyWalk n arr = (
+    if isValidNode n then (
+        append arr n
+        for c in n.children do collectHierarchyWalk c arr
     )
 )
 
-fn getSizeGroup sku =
-(
-    if findItem SIZE_SMALL sku > 0 then return "SMALL"
-    if findItem SIZE_MEDIUM sku > 0 then return "MEDIUM"
-    if findItem SIZE_LARGE sku > 0 then return "LARGE"
-    undefined
+fn collectHierarchy root = (
+    local out = #()
+    collectHierarchyWalk root out
+    out
 )
 
-fn getCamerasForSizeGroup sizeGroup =
-(
-    case sizeGroup of
-    (
-        "SMALL": CAMERAS_SMALL
-        "MEDIUM": CAMERAS_MEDIUM
-        "LARGE": CAMERAS_LARGE
-        default: undefined
-    )
+fn unhideSinkHierarchy sinkNode = (
+    local nodes = collectHierarchy sinkNode
+    try(select nodes)catch()
+    for n in nodes do try(n.isHidden = false)catch()
 )
 
-fn getNodeByExactName nodeName =
-(
-    getNodeByName nodeName exact:true ignoreCase:false
+fn assignMaterialHierarchy sinkNode matObj = (
+    local nodes = collectHierarchy sinkNode
+    for n in nodes where isKindOf n GeometryClass do try(n.material = matObj)catch()
 )
 
-fn verifyCameraNodes cameraNames =
-(
-    local cameraNodes = #()
-    local missing = #()
-
-    for cName in cameraNames do
-    (
-        local c = getNodeByExactName cName
-        if c == undefined then append missing cName else append cameraNodes c
-    )
-
-    #(cameraNodes, missing)
+fn loadMatLib = (
+    if g_matLib != undefined then return true
+    if not doesFileExist QUARTZ_MATLIB then return false
+    try (g_matLib = loadTempMaterialLibrary QUARTZ_MATLIB; g_matLib != undefined) catch(false)
 )
 
-fn arrayToCommaString arr =
-(
-    local s = ""
-    for i = 1 to arr.count do
-    (
-        s += arr[i]
-        if i < arr.count then s += ", "
-    )
-    s
-)
-
-fn buildOutputFilePath sku finishCode ipsIndex =
-(
-    local idxStr = formattedPrint ipsIndex format:"02d"
-    local fileName = sku + "_" + finishCode + "_IPS" + idxStr + ".jpg"
-    OUTPUT_ROOT + "\\" + sku + "\\" + fileName
-)
-
-fn ensureSkuOutputFolder sku =
-(
-    local dir = OUTPUT_ROOT + "\\" + sku
-    if doesDirectoryExist dir then return true
-    makeDir dir
-)
-
-fn ensureTempFolder =
-(
-    if not USE_TEMP_SCENE_PER_JOB then return true
-    ips_safeMakeDir TEMP_SCENE_FOLDER
-)
-
-fn loadQuartzMaterialByName matLibPath matName =
-(
-    if not doesFileExist matLibPath then return undefined
-
-    local ml = undefined
-    try (ml = loadTempMaterialLibrary matLibPath) catch (ml = undefined)
-    if ml == undefined then return undefined
-
-    for i = 1 to ml.count do
-    (
-        local m = ml[i]
-        if m != undefined and (toUpper m.name == toUpper matName) then return m
+fn getMatByName matName = (
+    if g_matLib == undefined then return undefined
+    for i = 1 to g_matLib.count do (
+        local m = g_matLib[i]
+        if m != undefined and m.name == matName do return m
     )
     undefined
 )
 
-fn setJpgOutputQuality quality =
-(
-    try (renderers.current.output_jpeg_quality = quality) catch()
-    try (JPEGIO.setQuality quality) catch()
+fn buildOutPath sku finCode ipsIdx = (
+    local num = if ipsIdx < 10 then ("0" + ipsIdx as string) else (ipsIdx as string)
+    OUTPUT_ROOT + "\\" + sku + "\\" + sku + "_" + finCode + "_IPS" + num + ".jpg"
 )
 
-fn setRenderStateForSubmission camNode outputPath width height =
-(
-    try (rendOutputFilename = outputPath) catch()
-    try (rendSaveFile = true) catch()
-    try (rendImageAspect = 1.0) catch()
-    try (renderWidth = width) catch()
-    try (renderHeight = height) catch()
-    try (rendUseActiveView = false) catch()
-    try (rendCamNode = camNode) catch()
-    try (viewport.setCamera camNode) catch()
+fn buildTempScenePath sku finCode = (TEMP_SCENE_FOLDER + "\\" + sku + "_" + finCode + ".max")
 
-    setJpgOutputQuality JPG_QUALITY
-    completeRedraw()
-    sleep (SUBMISSION_STABILIZE_MS / 1000.0)
+fn clearBatchViews = (
+    -- FIX: deleteView expects an integer index, not getView() interface.
+    while (batchRenderMgr.numViews > 0) do (
+        try (batchRenderMgr.deleteView 1) catch (exit)
+    )
 )
 
-fn buildTempScenePath jobName =
-(
-    TEMP_SCENE_FOLDER + "\\" + jobName + ".max"
-)
-
-fn saveTempSceneSnapshot tempScenePath =
-(
-    if DRY_RUN then return true
-
-    local ok = false
-    try
-    (
-        -- save selected job state to isolated scene file for reliable queueing
-        saveMaxFile tempScenePath clearNeedSaveFlag:true useNewFile:false quiet:true
-        ok = doesFileExist tempScenePath
-    )
-    catch (ok = false)
-    ok
-)
-
-fn escapeForExecute s =
-(
-    substituteString s "\\" "\\\\"
-)
-
-fn quoteArg s =
-(
-    "\"" + s + "\""
-)
-
-fn runDosCommandSuccess cmdLine =
-(
-    local ok = false
-    try
-    (
-        local rc = DOSCommand cmdLine
-        ok = (rc == 0 or rc == true)
-    ) catch (ok = false)
-    ok
-)
-
-fn escapeInnerQuotes s =
-(
-    substituteString s "\"" "\\\""
-)
-
-fn applyToken template token value =
-(
-    substituteString template token value
-)
-
-fn buildCustomBatchCommand template cmdjobExe manager port jobName priority taskArgs =
-(
-    local c = template
-    c = applyToken c "{CMDJOB_EXE}" cmdjobExe
-    c = applyToken c "{MANAGER}" manager
-    c = applyToken c "{PORT}" (port as string)
-    c = applyToken c "{JOB_NAME}" jobName
-    c = applyToken c "{PRIORITY}" (priority as string)
-    c = applyToken c "{TASK_ARGS}" taskArgs
-    c
-)
-
-fn submitViaCmdJob tempScenePath jobName cameraName outputPath width height =
-(
-    if DRY_RUN then return true
-
-    if (not doesFileExist CMDJOB_EXE) then
-    (
-        if not LOGGED_MISSING_CMDJOB do
-        (
-            ips_log ("CMDJOB missing, skipping cmdjob submit path: " + CMDJOB_EXE)
-            LOGGED_MISSING_CMDJOB = true
-        )
-        return false
-    )
-
-    if (not doesFileExist MAXCMD_EXE) then
-    (
-        if not LOGGED_MISSING_MAXCMD do
-        (
-            ips_log ("3dsmaxcmd missing, skipping cmdjob submit path: " + MAXCMD_EXE)
-            LOGGED_MISSING_MAXCMD = true
-        )
-        return false
-    )
-
-    local taskCmd = quoteArg MAXCMD_EXE + " " + quoteArg tempScenePath + \
-        " -camera:" + quoteArg cameraName + \
-        " -outputName:" + quoteArg outputPath + \
-        " -w:" + (width as string) + \
-        " -h:" + (height as string)
-    local taskEsc = escapeInnerQuotes taskCmd
-
-    -- Try multiple cmdjob syntaxes because switch formats vary by Backburner version.
-    local bbCmdA = quoteArg CMDJOB_EXE + \
-        " -manager:" + BACKBURNER_MANAGER + \
-        " -port:" + (BACKBURNER_PORT as string) + \
-        " -jobName:" + quoteArg jobName + \
-        " -priority:" + (CMDJOB_PRIORITY as string) + \
-        " -taskName:1 -task:" + quoteArg taskEsc
-
-    local bbCmdB = quoteArg CMDJOB_EXE + \
-        " -manager " + quoteArg BACKBURNER_MANAGER + \
-        " -port " + (BACKBURNER_PORT as string) + \
-        " -jobName " + quoteArg jobName + \
-        " -priority " + (CMDJOB_PRIORITY as string) + \
-        " -taskName " + quoteArg "1" + " -task " + quoteArg taskEsc
-
-    ips_log ("CMDJOB submit command A: " + bbCmdA)
-    local result = runDosCommandSuccess bbCmdA
-
-    if not result then
-    (
-        ips_log ("CMDJOB submit command B: " + bbCmdB)
-        result = runDosCommandSuccess bbCmdB
-    )
-
-    result
-)
-
-fn submitFinishBatchViaCmdJob scenePath sku finishCode cameraNodes =
-(
-    if DRY_RUN then return cameraNodes.count
-    if (not doesFileExist CMDJOB_EXE) then return 0
-    if (not doesFileExist MAXCMD_EXE) then return 0
-
-    local batchJobName = sku + "_" + finishCode + "_IPS_BATCH"
-    local bbCmdBaseA = quoteArg CMDJOB_EXE + \
-        " -manager:" + BACKBURNER_MANAGER + \
-        " -port:" + (BACKBURNER_PORT as string) + \
-        " -jobName:" + quoteArg batchJobName + \
-        " -priority:" + (CMDJOB_PRIORITY as string)
-
-    local bbCmdBaseB = quoteArg CMDJOB_EXE + \
-        " -manager " + quoteArg BACKBURNER_MANAGER + \
-        " -port " + (BACKBURNER_PORT as string) + \
-        " -jobName " + quoteArg batchJobName + \
-        " -priority " + (CMDJOB_PRIORITY as string)
-
-    local bbCmdA = bbCmdBaseA
-    local bbCmdB = bbCmdBaseB
-    local taskArgsA = ""
-    local taskArgsB = ""
-
-    for i = 1 to cameraNodes.count do
-    (
-        local camName = cameraNodes[i].name
-        local outPath = buildOutputFilePath sku finishCode i
-        local taskCmd = quoteArg MAXCMD_EXE + " " + quoteArg scenePath + \
-            " -camera:" + quoteArg camName + \
-            " -outputName:" + quoteArg outPath + \
-            " -w:" + (RENDER_WIDTH as string) + \
-            " -h:" + (RENDER_HEIGHT as string)
-        local taskEsc = escapeInnerQuotes taskCmd
-
-        local tName = (sku + "_" + finishCode + "_IPS" + (formattedPrint i format:"02d"))
-        bbCmdA += " -taskName:" + quoteArg tName + " -task:" + quoteArg taskEsc
-        bbCmdB += " -taskName " + quoteArg tName + " -task " + quoteArg taskEsc
-        taskArgsA += " -taskName:" + quoteArg tName + " -task:" + quoteArg taskEsc
-        taskArgsB += " -taskName " + quoteArg tName + " -task " + quoteArg taskEsc
-    )
-
-    if USE_CUSTOM_SUBMIT_COMMAND and CUSTOM_BATCH_COMMAND_TEMPLATE != "" then
-    (
-        local customCmd = buildCustomBatchCommand CUSTOM_BATCH_COMMAND_TEMPLATE CMDJOB_EXE BACKBURNER_MANAGER BACKBURNER_PORT batchJobName CMDJOB_PRIORITY taskArgsA
-        ips_log ("CUSTOM submit command: " + customCmd)
-        local okCustom = runDosCommandSuccess customCmd
-        if okCustom then return cameraNodes.count
-    )
-
-    ips_log ("CMDJOB batch submit command A: " + bbCmdA)
-    local ok = runDosCommandSuccess bbCmdA
-
-    if not ok then
-    (
-        ips_log ("CMDJOB batch submit command B: " + bbCmdB)
-        ok = runDosCommandSuccess bbCmdB
-    )
-
-    if ok then cameraNodes.count else 0
-)
-
-fn submitViaNetRender tempScenePath jobName managerIP managerPort =
-(
-    if DRY_RUN then return true
-
-    local submitted = false
-
-    -- Best-effort compatibility across Max versions:
-    -- try direct calls first, then fallback to execute() variants.
-    try (if isProperty netrender #manager do netrender.manager = managerIP) catch()
-    try (if isProperty netrender #port do netrender.port = managerPort) catch()
-
-    if not submitted then
-    (
-        try
-        (
-            if isProperty netrender #submitJob then
-            (
-                local r = netrender.submitJob tempScenePath jobName:jobName
-                submitted = (r != undefined and r != false)
-            )
-        ) catch()
-    )
-
-    if not submitted then
-    (
-        try
-        (
-            if isProperty netrender #submit then
-            (
-                local r2 = netrender.submit tempScenePath jobName
-                submitted = (r2 != undefined and r2 != false)
-            )
-        ) catch()
-    )
-
-    if not submitted then
-    (
-        try
-        (
-            local cmd = "netrender.submitJob @\"" + tempScenePath + "\" jobName:@\"" + jobName + "\""
-            local r3 = execute cmd
-            submitted = (r3 != undefined and r3 != false)
-        ) catch()
-    )
-
-    if not submitted then
-    (
-        try
-        (
-            local cmd2 = "netrender.submit @\"" + tempScenePath + "\" @\"" + jobName + "\""
-            local r4 = execute cmd2
-            submitted = (r4 != undefined and r4 != false)
-        ) catch()
-    )
-
-    if not submitted then
-    (
-        try
-        (
-            local cmd3 = "SubmitToNetwork @\"" + tempScenePath + "\""
-            local r5 = execute cmd3
-            submitted = (r5 != undefined and r5 != false)
-        ) catch()
-    )
-
-    submitted
-)
-
-fn submitViaBatchRenderIfPossible tempScenePath jobName =
-(
-    if DRY_RUN then return true
-    if not PREFER_BATCH_RENDER_SUBMIT then return false
-
-    local submitted = false
-
-    -- Try common batch-render manager entry points via execute for version tolerance.
-    try
-    (
-        local cmdA = "if (batchRenderMgr != undefined and isProperty batchRenderMgr #submitToNetwork) then (batchRenderMgr.submitToNetwork @\"" + tempScenePath + "\" @\"" + jobName + "\") else false"
-        local rA = execute cmdA
-        submitted = (rA != undefined and rA != false)
-    ) catch()
-
-    if not submitted then
-    (
-        try
-        (
-            local cmdB = "if (batchRenderMgr != undefined and isProperty batchRenderMgr #netRender) then (batchRenderMgr.netRender @\"" + tempScenePath + "\" @\"" + jobName + "\") else false"
-            local rB = execute cmdB
-            submitted = (rB != undefined and rB != false)
-        ) catch()
-    )
-
-    submitted
-)
-
-fn configureBatchRenderForFinish sku finishCode cameraNodes =
-(
-    if not CONFIGURE_BATCH_WINDOW then return false
-
-    local configured = false
-
-    -- Clear existing batch views (try common API variants).
-    try (execute "if (batchRenderMgr != undefined and isProperty batchRenderMgr #numViews and isProperty batchRenderMgr #deleteView) do (for i = batchRenderMgr.numViews to 1 by -1 do batchRenderMgr.deleteView i)") catch()
-    try (execute "if (batchRenderMgr != undefined and isProperty batchRenderMgr #GetViewCount and isProperty batchRenderMgr #DeleteView) do (for i = batchRenderMgr.GetViewCount() to 1 by -1 do batchRenderMgr.DeleteView i)") catch()
-
-    for i = 1 to cameraNodes.count do
-    (
-        local camName = cameraNodes[i].name
-        local viewName = sku + "_" + finishCode + "_IPS" + (formattedPrint i format:"02d")
-        local outPath = buildOutputFilePath sku finishCode i
-        local camExpr = "$'" + camName + "'"
-
-        -- Variant A: addView with named args
-        local cmdA = "if (batchRenderMgr != undefined and isProperty batchRenderMgr #addView) then (batchRenderMgr.addView name:@\"" + viewName + "\" camera:" + camExpr + " output:@\"" + outPath + "\" width:" + (RENDER_WIDTH as string) + " height:" + (RENDER_HEIGHT as string) + " enabled:true) else false"
-        local okA = false
-        try (okA = execute cmdA) catch (okA = false)
-
-        if okA == false then
-        (
-            -- Variant B: create view and set properties
-            local cmdB = "if (batchRenderMgr != undefined and isProperty batchRenderMgr #createView) then (local v = batchRenderMgr.createView(); if v != undefined do (v.name=@\"" + viewName + "\"; v.camera=" + camExpr + "; if isProperty v #outputFilename do v.outputFilename=@\"" + outPath + "\"; if isProperty v #width do v.width=" + (RENDER_WIDTH as string) + "; if isProperty v #height do v.height=" + (RENDER_HEIGHT as string) + "; if isProperty v #enabled do v.enabled=true; true) else false) else false"
-            local okB = false
-            try (okB = execute cmdB) catch (okB = false)
-            if okB == false then
-            (
-                -- Variant C: AddView positional
-                local cmdC = "if (batchRenderMgr != undefined and isProperty batchRenderMgr #AddView) then (batchRenderMgr.AddView @\"" + viewName + "\" " + camExpr + " @\"" + outPath + "\" " + (RENDER_WIDTH as string) + " " + (RENDER_HEIGHT as string) + ") else false"
-                local okC = false
-                try (okC = execute cmdC) catch (okC = false)
-
-                if okC == false then
-                (
-                    -- Variant D: addView positional
-                    local cmdD = "if (batchRenderMgr != undefined and isProperty batchRenderMgr #addView) then (batchRenderMgr.addView @\"" + viewName + "\" " + camExpr + " @\"" + outPath + "\" " + (RENDER_WIDTH as string) + " " + (RENDER_HEIGHT as string) + ") else false"
-                    local okD = false
-                    try (okD = execute cmdD) catch (okD = false)
-                    if okD == true then configured = true
-                )
-                else configured = true
-            )
-            else configured = true
-        )
-        else
-        (
-            configured = true
-        )
-    )
-
-    -- Final verify if manager exposes count.
-    try
-    (
-        local countA = execute "if (batchRenderMgr != undefined and isProperty batchRenderMgr #numViews) then batchRenderMgr.numViews else -1"
-        if countA != undefined and countA >= cameraNodes.count then configured = true
-    ) catch()
-    try
-    (
-        local countB = execute "if (batchRenderMgr != undefined and isProperty batchRenderMgr #GetViewCount) then batchRenderMgr.GetViewCount() else -1"
-        if countB != undefined and countB >= cameraNodes.count then configured = true
-    ) catch()
-
-    configured
-)
-
-fn submitViaIgrBatchServerMethod sku finishCode cameraNodes =
-(
-    if DRY_RUN then return cameraNodes.count
-    if not USE_IGR_BATCH_METHOD then return 0
-
-    local submitted = false
-    local jobName = sku + "_" + finishCode + "_IPS_BATCH"
-
-    -- Try to set a job name if API exposes one.
-    try (execute ("if (batchRenderMgr != undefined and isProperty batchRenderMgr #jobName) do (batchRenderMgr.jobName = @\"" + jobName + "\")")) catch()
-    try (execute ("if (batchRenderMgr != undefined and isProperty batchRenderMgr #JobName) do (batchRenderMgr.JobName = @\"" + jobName + "\")")) catch()
-
-    -- Try common batch net-render submit entry points (no scene path args).
-    try
-    (
-        local rA = execute "if (batchRenderMgr != undefined and isProperty batchRenderMgr #netRender) then batchRenderMgr.netRender() else false"
-        submitted = (rA != undefined and rA != false)
-    ) catch()
-
-    if not submitted then
-    (
-        try
-        (
-            local rB = execute "if (batchRenderMgr != undefined and isProperty batchRenderMgr #submitToNetwork) then batchRenderMgr.submitToNetwork() else false"
-            submitted = (rB != undefined and rB != false)
-        ) catch()
-    )
-
-    if not submitted then
-    (
-        try
-        (
-            local rC = execute "if (batchRenderMgr != undefined and isProperty batchRenderMgr #SubmitToNetwork) then batchRenderMgr.SubmitToNetwork() else false"
-            submitted = (rC != undefined and rC != false)
-        ) catch()
-    )
-
-    if submitted then cameraNodes.count else 0
-)
-
-fn submitBackburnerJob camNode outputPath jobName =
-(
-    local success = false
-
-    try
-    (
-        setRenderStateForSubmission camNode outputPath RENDER_WIDTH RENDER_HEIGHT
-
-        local submissionScene = maxFilePath + maxFileName
-
-        if USE_TEMP_SCENE_PER_JOB then
-        (
-            local tempScene = buildTempScenePath jobName
-            if not (saveTempSceneSnapshot tempScene) then
-            (
-                ips_log ("ERROR: Could not create temp scene snapshot: " + tempScene)
-                return false
-            )
-            submissionScene = tempScene
-        )
-
-        success = submitViaCmdJob submissionScene jobName camNode.name outputPath RENDER_WIDTH RENDER_HEIGHT
-        if not success do success = submitViaBatchRenderIfPossible submissionScene jobName
-        if not success do success = submitViaNetRender submissionScene jobName BACKBURNER_MANAGER BACKBURNER_PORT
-    )
-    catch
-    (
-        success = false
-    )
-
-    success
-)
-
-fn getSubmissionScenePathForCurrentState sku finishCode =
-(
-    local submissionScene = maxFilePath + maxFileName
-
-    if USE_TEMP_SCENE_PER_JOB then
-    (
-        local tempScene = buildTempScenePath (sku + "_" + finishCode + "_STATE")
-        if saveTempSceneSnapshot tempScene then
-            submissionScene = tempScene
-        else
-            ips_log ("WARN: Temp scene snapshot failed, using current scene path: " + submissionScene)
-    )
-
-    submissionScene
-)
-
-fn allMappedSkus =
-(
-    local skus = #()
-    join skus SIZE_SMALL
-    join skus SIZE_MEDIUM
-    join skus SIZE_LARGE
-    skus
+fn setJpgQuality = (
+    try (renderers.current.output_jpeg_quality = JPG_QUALITY) catch()
+    try (JPEGIO.setQuality JPG_QUALITY) catch()
 )
 
 /* =========================
    MAIN
    ========================= */
 (
-    local totalSkus = 0
-    local skusFoundInScene = 0
-    local skusSkipped = 0
-    local jobsAttempted = 0
-    local jobsSubmitted = 0
-    local errorCount = 0
+    ALL_SKUS = #(); for s in SMALL_SKUS do append ALL_SKUS s; for s in MEDIUM_SKUS do append ALL_SKUS s; for s in LARGE_SKUS do append ALL_SKUS s
+    g_totalSKUs = ALL_SKUS.count
 
-    ips_initLogFile()
-    resolveToolPaths()
-    ips_log "----------------------------------------"
-    ips_log "IPS Quartz Backburner submission started."
-    ips_log ("Output root: " + OUTPUT_ROOT)
-    ips_log ("Quartz matlib: " + QUARTZ_MATLIB)
-    ips_log ("Backburner manager: " + BACKBURNER_MANAGER)
-    ips_log ("Backburner port: " + (BACKBURNER_PORT as string))
-    ips_log ("Render size: " + (RENDER_WIDTH as string) + "x" + (RENDER_HEIGHT as string))
-    ips_log ("Use temp scene per job: " + (USE_TEMP_SCENE_PER_JOB as string))
-    ips_log ("Prefer batch-render submit: " + (PREFER_BATCH_RENDER_SUBMIT as string))
-    ips_log ("Configure Batch Render window: " + (CONFIGURE_BATCH_WINDOW as string))
-    ips_log ("Use IGR batch server method: " + (USE_IGR_BATCH_METHOD as string))
-    ips_log ("Use custom submit command: " + (USE_CUSTOM_SUBMIT_COMMAND as string))
-    ips_log ("CMDJOB path: " + CMDJOB_EXE)
-    ips_log ("3dsmaxcmd path: " + MAXCMD_EXE)
-    ips_log ("Dry run: " + (DRY_RUN as string))
+    ensureFolder OUTPUT_ROOT
+    ensureFolder TEMP_SCENE_FOLDER
+    try (g_logStream = createFile LOG_FILE_PATH) catch(g_logStream = undefined)
 
-    if (CMDJOB_EXE == "" or MAXCMD_EXE == "") then
-    (
-        ips_log "WARN: cmdjob/3dsmaxcmd auto-detect incomplete."
-        ips_log "WARN: If queue submission fails, set CMDJOB_EXE and MAXCMD_EXE explicitly at top of script."
+    logMsg "============================================================"
+    logMsg "IPS Quartz Batch Render Net Render"
+    logMsg ("Output Root  : " + OUTPUT_ROOT)
+    logMsg ("Material Lib : " + QUARTZ_MATLIB)
+    logMsg ("BB Manager   : " + BACKBURNER_MANAGER)
+    logMsg ("Temp Scenes  : " + TEMP_SCENE_FOLDER)
+    logMsg ("Resolution   : " + RENDER_WIDTH as string + " x " + RENDER_HEIGHT as string)
+    logMsg ("Dry Run      : " + DRY_RUN as string)
+
+    if not loadMatLib() then (
+        logMsg "[FATAL] Cannot load material library."; if g_logStream != undefined do close g_logStream; return undefined
     )
 
-    if not doesFileExist QUARTZ_MATLIB then
-    (
-        ips_log "ERROR: Material library not found. Aborting run."
-        return false
-    )
+    local allSinks = getAllSinkNodes()
+    logMsg ("Sink nodes in scene: " + allSinks.count as string)
 
-    if not (ips_safeMakeDir OUTPUT_ROOT) then
-    (
-        ips_log "ERROR: Output root could not be created/accessed. Aborting run."
-        return false
-    )
+    for sku in ALL_SKUS do (
+        logMsg "------------------------------------------------------------"
+        logMsg (">>> SKU: " + sku)
 
-    if not (ensureTempFolder()) then
-    (
-        ips_log "ERROR: Temp scene folder could not be created/accessed. Aborting run."
-        return false
-    )
+        local grp = getSizeGroup sku
+        if grp == "" then (g_skippedSKUs += 1; logMsg "  [SKIP] Not mapped"; continue)
 
-    local sinkRootNodes = collectAllSinkRootNodes()
-    ips_log ("Detected sink root nodes in scene by prefix: " + (sinkRootNodes.count as string))
+        local sinkNode = getNodeByName sku exact:true
+        if sinkNode == undefined then (g_skippedSKUs += 1; logMsg "  [SKIP] Node not found"; continue)
+        g_foundSKUs += 1
 
-    local skus = allMappedSkus()
-    totalSkus = skus.count
-
-    for sku in skus do
-    (
-        ips_log "----------------------------------------"
-        ips_log ("Checking SKU: " + sku)
-
-        local sizeGroup = getSizeGroup sku
-        if sizeGroup == undefined then
-        (
-            skusSkipped += 1
-            errorCount += 1
-            ips_log ("SKIP: No size group mapping for SKU " + sku)
-            continue
+        local camNames = getCamNamesForGroup grp
+        local camArr = #(); local camOK = true
+        for cn in camNames do (
+            local c = getNodeByName cn exact:true
+            if c == undefined then (camOK = false; g_errors += 1; logMsg ("  [ERROR] Camera missing: " + cn); exit)
+            append camArr c
         )
+        if not camOK then (g_skippedSKUs += 1; continue)
 
-        local skuNode = getNodeByExactName sku
-        if skuNode == undefined then
-        (
-            skusSkipped += 1
-            ips_log ("SKIP: SKU not found in scene: " + sku)
-            continue
-        )
+        local skuDir = OUTPUT_ROOT + "\\" + sku
+        if not ensureFolder skuDir then (g_skippedSKUs += 1; g_errors += 1; logMsg "  [ERROR] Output dir failed"; continue)
 
-        skusFoundInScene += 1
-        ips_log ("SKU found. Size group: " + sizeGroup)
+        for fi = 1 to FINISH_CODES.count do (
+            local finCode = FINISH_CODES[fi]
+            local matName = FINISH_MATS[fi]
+            logMsg ("  -- Finish: " + finCode + " [" + matName + "]")
 
-        local cameraNames = getCamerasForSizeGroup sizeGroup
-        if cameraNames == undefined or cameraNames.count != 4 then
-        (
-            skusSkipped += 1
-            errorCount += 1
-            ips_log ("SKIP: Camera mapping invalid for size group " + sizeGroup)
-            continue
-        )
+            local mat = getMatByName matName
+            if mat == undefined then (g_errors += 1; logMsg "    [SKIP] Material missing"; continue)
 
-        local camValidation = verifyCameraNodes cameraNames
-        local cameraNodes = camValidation[1]
-        local missingCameras = camValidation[2]
+            hideAllSinks allSinks
+            unhideSinkHierarchy sinkNode
+            assignMaterialHierarchy sinkNode mat
+            setJpgQuality()
+            completeRedraw()
 
-        if missingCameras.count > 0 then
-        (
-            skusSkipped += 1
-            errorCount += missingCameras.count
-            ips_log ("SKIP: Missing required camera(s): " + (arrayToCommaString missingCameras))
-            continue
-        )
-
-        if not (ensureSkuOutputFolder sku) then
-        (
-            skusSkipped += 1
-            errorCount += 1
-            ips_log ("SKIP: Could not create/access output folder for SKU " + sku)
-            continue
-        )
-
-        for f in FINISHES do
-        (
-            local finishCode = f[1]
-            local matName = f[2]
-            ips_log ("Applying finish " + finishCode + " (" + matName + ")")
-
-            local qMat = undefined
-            try (qMat = loadQuartzMaterialByName QUARTZ_MATLIB matName) catch (qMat = undefined)
-            if qMat == undefined then
-            (
-                errorCount += 1
-                ips_log ("SKIP FINISH: Missing material " + matName)
-                continue
+            local tempPath = buildTempScenePath sku finCode
+            local snapOK = false
+            if DRY_RUN then (snapOK = true; logMsg ("    [DRY RUN] Save snapshot: " + tempPath))
+            else (
+                try (saveMaxFile tempPath clearNeedSaveFlag:false; snapOK = true; logMsg ("    [SNAP] " + tempPath))
+                catch (g_errors += 1; logMsg ("    [ERROR] saveMaxFile failed: " + getCurrentException()))
             )
+            if not snapOK then continue
 
-            try
-            (
-                hideAllSinks sinkRootNodes
-                selectSinkHierarchy skuNode -- ensures group children are included as requested
-                unhideSinkHierarchy skuNode
-                assignMaterialToSinkHierarchy skuNode qMat
-                completeRedraw()
-            )
-            catch
-            (
-                errorCount += 1
-                ips_log ("ERROR: Failed visibility/material setup for " + sku + " " + finishCode)
-                continue
-            )
+            clearBatchViews()
+            local viewsOK = true
 
-            local submissionScene = getSubmissionScenePathForCurrentState sku finishCode
+            for ci = 1 to camArr.count do (
+                local cam = camArr[ci]
+                local outFile = buildOutPath sku finCode ci
+                local vName = sku + "_" + finCode + "_IPS" + (if ci < 10 then ("0" + ci as string) else (ci as string))
+                logMsg ("    [VIEW] " + vName + " | " + cam.name + " -> " + outFile)
 
-            local batchWindowOk = configureBatchRenderForFinish sku finishCode cameraNodes
-            if batchWindowOk then
-                ips_log ("Batch Render window configured for " + sku + " " + finishCode)
-            else
-                ips_log ("WARN: Could not confirm Batch Render window configuration for " + sku + " " + finishCode)
+                g_jobsTried += 1
 
-            -- Preferred flow: one batch submission per finish containing all 4 camera tasks.
-            jobsAttempted += 4
-            local batchSubmittedCount = submitViaIgrBatchServerMethod sku finishCode cameraNodes
-            if batchSubmittedCount != 4 do
-                batchSubmittedCount = submitFinishBatchViaCmdJob submissionScene sku finishCode cameraNodes
-
-            if batchSubmittedCount == 4 then
-            (
-                jobsSubmitted += 4
-                ips_log ("SUBMITTED BATCH: " + sku + " " + finishCode + " (4 camera tasks)")
-            )
-            else
-            (
-                ips_log ("WARN: Batch submit unavailable/failed, falling back to per-camera submission.")
-                for i = 1 to 4 do
-                (
-                    local camNode = cameraNodes[i]
-                    local outputPath = buildOutputFilePath sku finishCode i
-                    local jobName = sku + "_" + finishCode + "_IPS" + (formattedPrint i format:"02d")
-
-                    ips_log ("Submitting camera " + camNode.name + " as job " + jobName)
-                    ips_log ("Output path: " + outputPath)
-
-                    local ok = false
-                    try (ok = submitBackburnerJob camNode outputPath jobName) catch (ok = false)
-
-                    if ok then
-                    (
-                        jobsSubmitted += 1
-                        ips_log ("SUBMITTED: " + jobName)
+                if not DRY_RUN then (
+                    local bv = undefined
+                    try (bv = batchRenderMgr.addView cam) catch (bv = undefined)
+                    if bv == undefined then (
+                        g_errors += 1; viewsOK = false; logMsg ("    [ERROR] addView failed for " + cam.name); exit
                     )
-                    else
-                    (
-                        errorCount += 1
-                        ips_log ("ERROR: Backburner submission failed for " + jobName)
-                    )
+                    try (bv.outputFilename = outFile) catch()
+                    try (bv.width = RENDER_WIDTH) catch()
+                    try (bv.height = RENDER_HEIGHT) catch()
+                    try (bv.frameBegin = 0; bv.frameEnd = 0) catch()
+                    try (bv.name = vName) catch()
+                    try (bv.enabled = true) catch()
+                )
+            )
+
+            if not viewsOK then continue
+
+            if DRY_RUN then (
+                g_jobsOK += 4
+                logMsg ("    [DRY RUN] Would submit batch: " + sku + "_" + finCode)
+            )
+            else (
+                try (
+                    batchRenderMgr.renderSceneFilename = tempPath
+                    batchRenderMgr.netRender = true
+                    batchRenderMgr.managerAddress = BACKBURNER_MANAGER
+                    batchRenderMgr.render()
+                    g_jobsOK += 4
+                    logMsg ("    [OK] Submitted batch: " + sku + "_" + finCode)
+                )
+                catch (
+                    g_errors += 1
+                    logMsg ("    [ERROR] Batch submit failed: " + sku + "_" + finCode + " | " + getCurrentException())
                 )
             )
         )
 
-        try (setHiddenForNodes (collectNodeHierarchy skuNode) true) catch()
+        clearBatchViews()
+        hideAllSinks allSinks
     )
 
-    hideAllSinks sinkRootNodes
+    for n in allSinks do try(n.isHidden = false)catch()
 
-    ips_log "----------------------------------------"
-    ips_log "FINAL SUMMARY"
-    ips_log ("Total SKUs in hardcoded table: " + (totalSkus as string))
-    ips_log ("Total SKUs found in scene: " + (skusFoundInScene as string))
-    ips_log ("Total SKUs skipped: " + (skusSkipped as string))
-    ips_log ("Total Backburner jobs attempted: " + (jobsAttempted as string))
-    ips_log ("Total Backburner jobs submitted: " + (jobsSubmitted as string))
-    ips_log ("Total errors: " + (errorCount as string))
-    ips_log "IPS Quartz Backburner submission finished."
-    ips_log "----------------------------------------"
+    logMsg "============================================================"
+    logMsg ("Total SKUs in table : " + g_totalSKUs as string)
+    logMsg ("SKUs found in scene : " + g_foundSKUs as string)
+    logMsg ("SKUs skipped        : " + g_skippedSKUs as string)
+    logMsg ("Jobs attempted      : " + g_jobsTried as string)
+    logMsg ("Jobs submitted OK   : " + g_jobsOK as string)
+    logMsg ("Errors              : " + g_errors as string)
+    logMsg "============================================================"
+
+    if g_logStream != undefined then try(close g_logStream)catch()
 )
