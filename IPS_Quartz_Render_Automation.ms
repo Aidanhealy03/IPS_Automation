@@ -389,6 +389,17 @@ fn quoteArg s =
     "\"" + s + "\""
 )
 
+fn runDosCommandSuccess cmdLine =
+(
+    local ok = false
+    try
+    (
+        local rc = DOSCommand cmdLine
+        ok = (rc == 0 or rc == true)
+    ) catch (ok = false)
+    ok
+)
+
 fn submitViaCmdJob tempScenePath jobName cameraName outputPath width height =
 (
     if DRY_RUN then return true
@@ -419,24 +430,28 @@ fn submitViaCmdJob tempScenePath jobName cameraName outputPath width height =
         " -w:" + (width as string) + \
         " -h:" + (height as string)
 
-    local bbCmd = quoteArg CMDJOB_EXE + \
+    -- Try multiple cmdjob syntaxes because switch formats vary by Backburner version.
+    local bbCmdA = quoteArg CMDJOB_EXE + \
         " -manager:" + BACKBURNER_MANAGER + \
         " -port:" + (BACKBURNER_PORT as string) + \
         " -jobName:" + quoteArg jobName + \
         " -priority:" + (CMDJOB_PRIORITY as string) + \
         " -taskName:1 -task:" + quoteArg taskCmd
 
-    ips_log ("CMDJOB submit command: " + bbCmd)
+    local bbCmdB = quoteArg CMDJOB_EXE + \
+        " -manager " + quoteArg BACKBURNER_MANAGER + \
+        " -port " + (BACKBURNER_PORT as string) + \
+        " -jobName " + quoteArg jobName + \
+        " -priority " + (CMDJOB_PRIORITY as string) + \
+        " -taskName " + quoteArg "1" + " -task " + quoteArg taskCmd
 
-    local result = false
-    try
+    ips_log ("CMDJOB submit command A: " + bbCmdA)
+    local result = runDosCommandSuccess bbCmdA
+
+    if not result then
     (
-        local rc = DOSCommand bbCmd
-        result = (rc == 0 or rc == true)
-    )
-    catch
-    (
-        result = false
+        ips_log ("CMDJOB submit command B: " + bbCmdB)
+        result = runDosCommandSuccess bbCmdB
     )
 
     result
@@ -449,11 +464,20 @@ fn submitFinishBatchViaCmdJob scenePath sku finishCode cameraNodes =
     if (not doesFileExist MAXCMD_EXE) then return 0
 
     local batchJobName = sku + "_" + finishCode + "_IPS_BATCH"
-    local bbCmd = quoteArg CMDJOB_EXE + \
+    local bbCmdBaseA = quoteArg CMDJOB_EXE + \
         " -manager:" + BACKBURNER_MANAGER + \
         " -port:" + (BACKBURNER_PORT as string) + \
         " -jobName:" + quoteArg batchJobName + \
         " -priority:" + (CMDJOB_PRIORITY as string)
+
+    local bbCmdBaseB = quoteArg CMDJOB_EXE + \
+        " -manager " + quoteArg BACKBURNER_MANAGER + \
+        " -port " + (BACKBURNER_PORT as string) + \
+        " -jobName " + quoteArg batchJobName + \
+        " -priority " + (CMDJOB_PRIORITY as string)
+
+    local bbCmdA = bbCmdBaseA
+    local bbCmdB = bbCmdBaseB
 
     for i = 1 to cameraNodes.count do
     (
@@ -465,18 +489,19 @@ fn submitFinishBatchViaCmdJob scenePath sku finishCode cameraNodes =
             " -w:" + (RENDER_WIDTH as string) + \
             " -h:" + (RENDER_HEIGHT as string)
 
-        bbCmd += " -taskName:" + quoteArg (sku + "_" + finishCode + "_IPS" + (formattedPrint i format:"02d"))
-        bbCmd += " -task:" + quoteArg taskCmd
+        local tName = (sku + "_" + finishCode + "_IPS" + (formattedPrint i format:"02d"))
+        bbCmdA += " -taskName:" + quoteArg tName + " -task:" + quoteArg taskCmd
+        bbCmdB += " -taskName " + quoteArg tName + " -task " + quoteArg taskCmd
     )
 
-    ips_log ("CMDJOB batch submit command: " + bbCmd)
+    ips_log ("CMDJOB batch submit command A: " + bbCmdA)
+    local ok = runDosCommandSuccess bbCmdA
 
-    local ok = false
-    try
+    if not ok then
     (
-        local rc = DOSCommand bbCmd
-        ok = (rc == 0 or rc == true)
-    ) catch (ok = false)
+        ips_log ("CMDJOB batch submit command B: " + bbCmdB)
+        ok = runDosCommandSuccess bbCmdB
+    )
 
     if ok then cameraNodes.count else 0
 )
@@ -660,6 +685,12 @@ fn allMappedSkus =
     ips_log ("CMDJOB path: " + CMDJOB_EXE)
     ips_log ("3dsmaxcmd path: " + MAXCMD_EXE)
     ips_log ("Dry run: " + (DRY_RUN as string))
+
+    if (CMDJOB_EXE == "" or MAXCMD_EXE == "") then
+    (
+        ips_log "WARN: cmdjob/3dsmaxcmd auto-detect incomplete."
+        ips_log "WARN: If queue submission fails, set CMDJOB_EXE and MAXCMD_EXE explicitly at top of script."
+    )
 
     if not doesFileExist QUARTZ_MATLIB then
     (
