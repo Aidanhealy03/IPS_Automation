@@ -30,6 +30,7 @@ global DRY_RUN            = false
 global USE_TEMP_SCENE_PER_JOB = false
 global SUBMISSION_STABILIZE_MS = 250
 global PREFER_BATCH_RENDER_SUBMIT = true
+global CONFIGURE_BATCH_WINDOW = true
 global CMDJOB_EXE         = @"" -- leave blank to auto-detect
 global MAXCMD_EXE         = @"" -- leave blank to auto-detect (recommended)
 global CMDJOB_PRIORITY    = 50
@@ -602,6 +603,45 @@ fn submitViaBatchRenderIfPossible tempScenePath jobName =
     submitted
 )
 
+fn configureBatchRenderForFinish sku finishCode cameraNodes =
+(
+    if not CONFIGURE_BATCH_WINDOW then return false
+
+    local configured = false
+
+    -- Clear existing batch views (try common API variants).
+    try (execute "if (batchRenderMgr != undefined and isProperty batchRenderMgr #numViews and isProperty batchRenderMgr #deleteView) do (for i = batchRenderMgr.numViews to 1 by -1 do batchRenderMgr.deleteView i)") catch()
+    try (execute "if (batchRenderMgr != undefined and isProperty batchRenderMgr #GetViewCount and isProperty batchRenderMgr #DeleteView) do (for i = batchRenderMgr.GetViewCount() to 1 by -1 do batchRenderMgr.DeleteView i)") catch()
+
+    for i = 1 to cameraNodes.count do
+    (
+        local camName = cameraNodes[i].name
+        local viewName = sku + "_" + finishCode + "_IPS" + (formattedPrint i format:"02d")
+        local outPath = buildOutputFilePath sku finishCode i
+        local camExpr = "$'" + camName + "'"
+
+        -- Variant A: addView with named args
+        local cmdA = "if (batchRenderMgr != undefined and isProperty batchRenderMgr #addView) then (batchRenderMgr.addView name:@\"" + viewName + "\" camera:" + camExpr + " output:@\"" + outPath + "\" width:" + (RENDER_WIDTH as string) + " height:" + (RENDER_HEIGHT as string) + " enabled:true) else false"
+        local okA = false
+        try (okA = execute cmdA) catch (okA = false)
+
+        if okA == false then
+        (
+            -- Variant B: create view and set properties
+            local cmdB = "if (batchRenderMgr != undefined and isProperty batchRenderMgr #createView) then (local v = batchRenderMgr.createView(); if v != undefined do (v.name=@\"" + viewName + "\"; v.camera=" + camExpr + "; if isProperty v #outputFilename do v.outputFilename=@\"" + outPath + "\"; if isProperty v #width do v.width=" + (RENDER_WIDTH as string) + "; if isProperty v #height do v.height=" + (RENDER_HEIGHT as string) + "; if isProperty v #enabled do v.enabled=true; true) else false) else false"
+            local okB = false
+            try (okB = execute cmdB) catch (okB = false)
+            if okB == true then configured = true
+        )
+        else
+        (
+            configured = true
+        )
+    )
+
+    configured
+)
+
 fn submitBackburnerJob camNode outputPath jobName =
 (
     local success = false
@@ -682,6 +722,7 @@ fn allMappedSkus =
     ips_log ("Render size: " + (RENDER_WIDTH as string) + "x" + (RENDER_HEIGHT as string))
     ips_log ("Use temp scene per job: " + (USE_TEMP_SCENE_PER_JOB as string))
     ips_log ("Prefer batch-render submit: " + (PREFER_BATCH_RENDER_SUBMIT as string))
+    ips_log ("Configure Batch Render window: " + (CONFIGURE_BATCH_WINDOW as string))
     ips_log ("CMDJOB path: " + CMDJOB_EXE)
     ips_log ("3dsmaxcmd path: " + MAXCMD_EXE)
     ips_log ("Dry run: " + (DRY_RUN as string))
@@ -801,6 +842,12 @@ fn allMappedSkus =
             )
 
             local submissionScene = getSubmissionScenePathForCurrentState sku finishCode
+
+            local batchWindowOk = configureBatchRenderForFinish sku finishCode cameraNodes
+            if batchWindowOk then
+                ips_log ("Batch Render window configured for " + sku + " " + finishCode)
+            else
+                ips_log ("WARN: Could not confirm Batch Render window configuration for " + sku + " " + finishCode)
 
             -- Preferred flow: one batch submission per finish containing all 4 camera tasks.
             jobsAttempted += 4
