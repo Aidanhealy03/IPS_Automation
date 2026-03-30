@@ -30,9 +30,11 @@ global DRY_RUN            = false
 global USE_TEMP_SCENE_PER_JOB = false
 global SUBMISSION_STABILIZE_MS = 250
 global PREFER_BATCH_RENDER_SUBMIT = true
-global CMDJOB_EXE         = @"C:\Program Files (x86)\Autodesk\Backburner\cmdjob.exe"
-global MAXCMD_EXE         = @"C:\Program Files\Autodesk\3ds Max\3dsmaxcmd.exe"
+global CMDJOB_EXE         = @"" -- leave blank to auto-detect
+global MAXCMD_EXE         = @"" -- leave blank to auto-detect (recommended)
 global CMDJOB_PRIORITY    = 50
+global LOGGED_MISSING_CMDJOB = false
+global LOGGED_MISSING_MAXCMD = false
 
 /* =========================
    HARDCODED TABLES
@@ -87,6 +89,44 @@ fn ips_safeMakeDir path =
     if path == undefined or path == "" then return false
     if doesDirectoryExist path then return true
     makeDir path
+)
+
+fn firstExistingPath candidates =
+(
+    for p in candidates do
+    (
+        if p != undefined and p != "" and doesFileExist p do return p
+    )
+    ""
+)
+
+fn resolveToolPaths =
+(
+    local maxRoot = ""
+    try (maxRoot = getDir #maxroot) catch (maxRoot = "")
+
+    if (MAXCMD_EXE == undefined or MAXCMD_EXE == "" or not doesFileExist MAXCMD_EXE) then
+    (
+        local maxCmdCandidates = #(
+            (maxRoot + @"3dsmaxcmd.exe"),
+            @"C:\Program Files\Autodesk\3ds Max 2026\3dsmaxcmd.exe",
+            @"C:\Program Files\Autodesk\3ds Max 2025\3dsmaxcmd.exe",
+            @"C:\Program Files\Autodesk\3ds Max 2024\3dsmaxcmd.exe",
+            @"C:\Program Files\Autodesk\3ds Max 2023\3dsmaxcmd.exe",
+            @"C:\Program Files\Autodesk\3ds Max\3dsmaxcmd.exe"
+        )
+        MAXCMD_EXE = firstExistingPath maxCmdCandidates
+    )
+
+    if (CMDJOB_EXE == undefined or CMDJOB_EXE == "" or not doesFileExist CMDJOB_EXE) then
+    (
+        local bbCandidates = #(
+            (maxRoot + @"Backburner\cmdjob.exe"),
+            @"C:\Program Files (x86)\Autodesk\Backburner\cmdjob.exe",
+            @"C:\Program Files\Autodesk\Backburner\cmdjob.exe"
+        )
+        CMDJOB_EXE = firstExistingPath bbCandidates
+    )
 )
 
 fn ips_initLogFile =
@@ -355,13 +395,21 @@ fn submitViaCmdJob tempScenePath jobName cameraName outputPath width height =
 
     if (not doesFileExist CMDJOB_EXE) then
     (
-        ips_log ("CMDJOB missing, skipping cmdjob submit path: " + CMDJOB_EXE)
+        if not LOGGED_MISSING_CMDJOB do
+        (
+            ips_log ("CMDJOB missing, skipping cmdjob submit path: " + CMDJOB_EXE)
+            LOGGED_MISSING_CMDJOB = true
+        )
         return false
     )
 
     if (not doesFileExist MAXCMD_EXE) then
     (
-        ips_log ("3dsmaxcmd missing, skipping cmdjob submit path: " + MAXCMD_EXE)
+        if not LOGGED_MISSING_MAXCMD do
+        (
+            ips_log ("3dsmaxcmd missing, skipping cmdjob submit path: " + MAXCMD_EXE)
+            LOGGED_MISSING_MAXCMD = true
+        )
         return false
     )
 
@@ -599,6 +647,7 @@ fn allMappedSkus =
     local errorCount = 0
 
     ips_initLogFile()
+    resolveToolPaths()
     ips_log "----------------------------------------"
     ips_log "IPS Quartz Backburner submission started."
     ips_log ("Output root: " + OUTPUT_ROOT)
