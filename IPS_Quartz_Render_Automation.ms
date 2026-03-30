@@ -30,6 +30,9 @@ global DRY_RUN            = false
 global USE_TEMP_SCENE_PER_JOB = true
 global SUBMISSION_STABILIZE_MS = 250
 global PREFER_BATCH_RENDER_SUBMIT = true
+global CMDJOB_EXE         = @"C:\Program Files (x86)\Autodesk\Backburner\cmdjob.exe"
+global MAXCMD_EXE         = @"C:\Program Files\Autodesk\3ds Max\3dsmaxcmd.exe"
+global CMDJOB_PRIORITY    = 50
 
 /* =========================
    HARDCODED TABLES
@@ -341,6 +344,56 @@ fn escapeForExecute s =
     substituteString s "\\" "\\\\"
 )
 
+fn quoteArg s =
+(
+    "\"" + s + "\""
+)
+
+fn submitViaCmdJob tempScenePath jobName cameraName outputPath width height =
+(
+    if DRY_RUN then return true
+
+    if (not doesFileExist CMDJOB_EXE) then
+    (
+        ips_log ("CMDJOB missing, skipping cmdjob submit path: " + CMDJOB_EXE)
+        return false
+    )
+
+    if (not doesFileExist MAXCMD_EXE) then
+    (
+        ips_log ("3dsmaxcmd missing, skipping cmdjob submit path: " + MAXCMD_EXE)
+        return false
+    )
+
+    local taskCmd = quoteArg MAXCMD_EXE + " " + quoteArg tempScenePath + \
+        " -camera:" + quoteArg cameraName + \
+        " -outputName:" + quoteArg outputPath + \
+        " -w:" + (width as string) + \
+        " -h:" + (height as string)
+
+    local bbCmd = quoteArg CMDJOB_EXE + \
+        " -manager:" + BACKBURNER_MANAGER + \
+        " -port:" + (BACKBURNER_PORT as string) + \
+        " -jobName:" + quoteArg jobName + \
+        " -priority:" + (CMDJOB_PRIORITY as string) + \
+        " -taskName:1 -task:" + quoteArg taskCmd
+
+    ips_log ("CMDJOB submit command: " + bbCmd)
+
+    local result = false
+    try
+    (
+        local rc = DOSCommand bbCmd
+        result = (rc == 0 or rc == true)
+    )
+    catch
+    (
+        result = false
+    )
+
+    result
+)
+
 fn submitViaNetRender tempScenePath jobName managerIP managerPort =
 (
     if DRY_RUN then return true
@@ -458,7 +511,8 @@ fn submitBackburnerJob camNode outputPath jobName =
             submissionScene = tempScene
         )
 
-        success = submitViaBatchRenderIfPossible submissionScene jobName
+        success = submitViaCmdJob submissionScene jobName camNode.name outputPath RENDER_WIDTH RENDER_HEIGHT
+        if not success do success = submitViaBatchRenderIfPossible submissionScene jobName
         if not success do success = submitViaNetRender submissionScene jobName BACKBURNER_MANAGER BACKBURNER_PORT
     )
     catch
@@ -499,6 +553,8 @@ fn allMappedSkus =
     ips_log ("Render size: " + (RENDER_WIDTH as string) + "x" + (RENDER_HEIGHT as string))
     ips_log ("Use temp scene per job: " + (USE_TEMP_SCENE_PER_JOB as string))
     ips_log ("Prefer batch-render submit: " + (PREFER_BATCH_RENDER_SUBMIT as string))
+    ips_log ("CMDJOB path: " + CMDJOB_EXE)
+    ips_log ("3dsmaxcmd path: " + MAXCMD_EXE)
     ips_log ("Dry run: " + (DRY_RUN as string))
 
     if not doesFileExist QUARTZ_MATLIB then
